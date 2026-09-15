@@ -14,6 +14,7 @@ from app.ui.sidebar import Sidebar
 from app.ui.video_grid import VideoGrid
 from app.ui.video_tile import VideoTile
 from app.ui.add_dialog import AddDeviceDialog
+from app.ui.scan_dialog import ScanDialog
 
 
 class MainWindow(QMainWindow):
@@ -38,6 +39,7 @@ class MainWindow(QMainWindow):
 
         self.sidebar.add_nvr_requested.connect(self.on_add_nvr)
         self.sidebar.add_single_requested.connect(self.on_add_single)
+        self.sidebar.scan_network_requested.connect(self.on_scan_network)
         self.sidebar.expand_nvr_requested.connect(self.on_expand_nvr)
         self.sidebar.camera_toggle_requested.connect(self.on_toggle_camera)
         self.sidebar.remove_device_requested.connect(self.on_remove_device)
@@ -64,6 +66,19 @@ class MainWindow(QMainWindow):
             cfg = dlg.to_config()
             self.singles.append(cfg)
             self.sidebar.add_single_node(cfg)
+            save_all(self.nvrs, self.singles)
+
+    def on_scan_network(self):
+        dlg = ScanDialog(self)
+        if dlg.exec() and dlg.selected_cfg:
+            cfg = dlg.selected_cfg
+            if dlg.selected_kind == "nvr":
+                self.nvrs.append(cfg)
+                item = self.sidebar.add_nvr_node(cfg)
+                self.nvr_items[cfg.id] = item
+            else:
+                self.singles.append(cfg)
+                self.sidebar.add_single_node(cfg)
             save_all(self.nvrs, self.singles)
 
     def on_expand_nvr(self, nvr_cfg: CameraConfig):

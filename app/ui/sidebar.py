@@ -15,6 +15,7 @@ ROLE_CFG = Qt.ItemDataRole.UserRole + 1        # CameraConfig
 class Sidebar(QWidget):
     add_nvr_requested = pyqtSignal()
     add_single_requested = pyqtSignal()
+    scan_network_requested = pyqtSignal()
     expand_nvr_requested = pyqtSignal(object)      # CameraConfig of the NVR
     camera_toggle_requested = pyqtSignal(object)    # CameraConfig, add/remove from grid
     remove_device_requested = pyqtSignal(object, str)  # CameraConfig, kind
@@ -43,8 +44,12 @@ class Sidebar(QWidget):
         btn_row.addWidget(add_nvr_btn)
         btn_row.addWidget(add_single_btn)
 
+        scan_btn = QPushButton("🔍 סרוק רשת")
+        scan_btn.clicked.connect(self.scan_network_requested.emit)
+
         layout = QVBoxLayout(self)
         layout.addLayout(btn_row)
+        layout.addWidget(scan_btn)
         layout.addWidget(self.tree)
 
     # ---- population -------------------------------------------------
