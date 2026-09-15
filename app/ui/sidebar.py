@@ -19,6 +19,7 @@ class Sidebar(QWidget):
     expand_nvr_requested = pyqtSignal(object)      # CameraConfig of the NVR
     camera_toggle_requested = pyqtSignal(object)    # CameraConfig, add/remove from grid
     remove_device_requested = pyqtSignal(object, str)  # CameraConfig, kind
+    edit_device_requested = pyqtSignal(object, str)    # CameraConfig, kind
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -72,6 +73,24 @@ class Sidebar(QWidget):
             nvr_item.addChild(child)
         nvr_item.setExpanded(True)
 
+    def reset_nvr_children(self, nvr_item: QTreeWidgetItem):
+        """Drop any previously-loaded channel list (e.g. after editing the
+        NVR's credentials/IP, the old channels are stale) back to the
+        'click to load' placeholder."""
+        nvr_item.takeChildren()
+        placeholder = QTreeWidgetItem(["לחץ כדי לטעון ערוצים..."])
+        nvr_item.addChild(placeholder)
+        nvr_item.setExpanded(False)
+
+    def refresh_nvr_node(self, nvr_item: QTreeWidgetItem, cfg: CameraConfig):
+        nvr_item.setData(0, ROLE_CFG, cfg)
+        nvr_item.setText(0, f"🖥 {cfg.name} ({cfg.host})")
+        self.reset_nvr_children(nvr_item)
+
+    def refresh_single_node(self, item: QTreeWidgetItem, cfg: CameraConfig):
+        item.setData(0, ROLE_CFG, cfg)
+        item.setText(0, f"📷 {cfg.name} ({cfg.host})")
+
     def add_single_node(self, cfg: CameraConfig) -> QTreeWidgetItem:
         item = QTreeWidgetItem([f"📷 {cfg.name} ({cfg.host})"])
         item.setData(0, ROLE_KIND, "single")
@@ -97,7 +116,10 @@ class Sidebar(QWidget):
         if kind not in ("nvr", "single"):
             return
         menu = QMenu(self)
-        remove_action = menu.addAction("הסר")
+        edit_action = menu.addAction("✏ עריכת פרטי התחברות")
+        remove_action = menu.addAction("🗑 הסר")
         chosen = menu.exec(self.tree.viewport().mapToGlobal(pos))
         if chosen == remove_action:
             self.remove_device_requested.emit(cfg, kind)
+        elif chosen == edit_action:
+            self.edit_device_requested.emit(cfg, kind)

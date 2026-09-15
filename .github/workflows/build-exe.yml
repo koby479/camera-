@@ -21,13 +21,21 @@ jobs:
         run: |
           pip install -r requirements.txt
 
+      - name: Locate onvif WSDL directory
+        id: onvif_wsdl
+        run: |
+          $wsdl = python -c "import onvif, os; print(os.path.join(os.path.dirname(onvif.__file__), 'wsdl'))"
+          echo "path=$wsdl" >> $env:GITHUB_OUTPUT
+          echo "Found WSDL dir: $wsdl"
+          Get-ChildItem $wsdl -Recurse | Select-Object -First 5
+
       - name: Build EXE with PyInstaller (normal, windowed)
         run: |
-          pyinstaller --noconfirm --onefile --windowed --name "UniversalCamViewer" --collect-all numpy --collect-all cv2 --collect-all onvif --collect-all zeep --collect-all wsdiscovery --add-data "app;app" app/main.py
+          pyinstaller --noconfirm --onefile --windowed --name "UniversalCamViewer" --collect-all numpy --collect-all cv2 --collect-all onvif --collect-all zeep --collect-all wsdiscovery --add-data "${{ steps.onvif_wsdl.outputs.path }};onvif\wsdl" --add-data "app;app" app/main.py
 
       - name: Build DEBUG EXE with PyInstaller (console, shows errors)
         run: |
-          pyinstaller --noconfirm --onefile --console --name "UniversalCamViewer-DEBUG" --collect-all numpy --collect-all cv2 --collect-all onvif --collect-all zeep --collect-all wsdiscovery --add-data "app;app" app/main.py
+          pyinstaller --noconfirm --onefile --console --name "UniversalCamViewer-DEBUG" --collect-all numpy --collect-all cv2 --collect-all onvif --collect-all zeep --collect-all wsdiscovery --add-data "${{ steps.onvif_wsdl.outputs.path }};onvif\wsdl" --add-data "app;app" app/main.py
 
       - name: Upload EXE artifact
         uses: actions/upload-artifact@v4

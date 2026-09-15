@@ -67,8 +67,9 @@ async def _try_onvif(hit: ScanHit, username: str, password: str, timeout: float 
     onvif_port = 80 if 80 in hit.open_ports else (8000 if 8000 in hit.open_ports else 2020)
     try:
         from onvif import ONVIFCamera
+        from app.core.discovery import wsdl_dir
 
-        cam = ONVIFCamera(hit.host, onvif_port, username, password, no_cache=True)
+        cam = ONVIFCamera(hit.host, onvif_port, username, password, wsdl_dir=wsdl_dir(), no_cache=True)
         await asyncio.wait_for(cam.update_xaddrs(), timeout=timeout)
         device = await cam.create_devicemgmt_service()
         info = await asyncio.wait_for(device.GetDeviceInformation(), timeout=timeout)
