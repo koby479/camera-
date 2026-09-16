@@ -44,7 +44,8 @@ class CameraConfig:
 
     @property
     def rtsp_url(self) -> str:
-        auth = f"{self.username}:{self.password}@" if self.username else ""
+        from urllib.parse import quote
+        auth = f"{quote(self.username, safe='')}:{quote(self.password, safe='')}@" if self.username else ""
         path = self.rtsp_path if self.rtsp_path.startswith("/") else f"/{self.rtsp_path}"
         return f"rtsp://{auth}{self.host}:{self.port}{path}"
 
@@ -95,7 +96,8 @@ class CameraWorker(QThread):
         return None
 
     def _build_url(self, path: str) -> str:
-        auth = f"{self.cfg.username}:{self.cfg.password}@" if self.cfg.username else ""
+        from urllib.parse import quote
+        auth = f"{quote(self.cfg.username, safe='')}:{quote(self.cfg.password, safe='')}@" if self.cfg.username else ""
         p = path if path.startswith("/") else f"/{path}"
         return f"rtsp://{auth}{self.cfg.host}:{self.cfg.port}{p}"
 

@@ -224,6 +224,8 @@ class MainWindow(QMainWindow):
 
 def main():
     app = QApplication(sys.argv)
+    from app.ui.theme import DARK_THEME
+    app.setStyleSheet(DARK_THEME)
     win = MainWindow()
     win.show()
     sys.exit(app.exec())

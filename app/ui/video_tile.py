@@ -23,11 +23,11 @@ class VideoTile(QWidget):
 
         self.video_label = QLabel("ממתין לתמונה...")
         self.video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.video_label.setStyleSheet("background:#111; color:#666;")
+        self.video_label.setStyleSheet("background:#0d0f13; color:#5a5f6a; border-radius:0 0 8px 8px;")
         self.video_label.setMinimumSize(160, 90)
 
         self.title_label = QLabel()
-        self.title_label.setStyleSheet("font-weight:bold; padding:2px;")
+        self.title_label.setStyleSheet("font-weight:600; padding:2px; color:#e6e6e6;")
 
         self.status_label = QLabel()
         self.status_label.setStyleSheet("padding:2px;")
@@ -35,18 +35,19 @@ class VideoTile(QWidget):
         header = QWidget()
         from PyQt6.QtWidgets import QHBoxLayout
         h = QHBoxLayout(header)
-        h.setContentsMargins(4, 2, 4, 2)
+        h.setContentsMargins(8, 5, 8, 5)
         h.addWidget(self.title_label)
         h.addStretch()
         h.addWidget(self.status_label)
+        header.setStyleSheet("background:#1f232c; border-radius:8px 8px 0 0;")
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(1, 1, 1, 1)
+        layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         layout.addWidget(header)
         layout.addWidget(self.video_label, stretch=1)
 
-        self.setStyleSheet("border:1px solid #333;")
+        self.setStyleSheet("border:1px solid #2a2e37; border-radius:8px;")
         self.set_status(CameraStatus.UNKNOWN)
 
     def set_status(self, status: CameraStatus):
