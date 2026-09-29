@@ -26,6 +26,7 @@ class CameraStatus(Enum):
     ACTIVE = "active"      # פעילה
     DEAD = "dead"           # מתה (מגיבה אך אין תמונה תקינה)
     OFFLINE = "offline"     # לא מחוברת
+    AUTH_FAILED = "auth_failed"   # שם משתמש/סיסמה שגויים
 
 
 @dataclass
@@ -129,6 +130,16 @@ class CameraWorker(QThread):
         while self._running:
             if not self._tcp_reachable():
                 self._emit_status(CameraStatus.OFFLINE)
+                time.sleep(retry_delay)
+                continue
+
+            from app.core.rtsp_auth import AuthResult, check_rtsp_auth
+            probe_path = self._resolved_path or (
+                self.cfg.rtsp_path if self.cfg.rtsp_path.strip("/").lower() not in ("", "auto") else "/"
+            )
+            if check_rtsp_auth(self.cfg.host, self.cfg.port, probe_path,
+                               self.cfg.username, self.cfg.password) == AuthResult.BAD_CREDENTIALS:
+                self._emit_status(CameraStatus.AUTH_FAILED)
                 time.sleep(retry_delay)
                 continue
 

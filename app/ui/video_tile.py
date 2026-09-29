@@ -12,6 +12,7 @@ STATUS_LABELS = {
     CameraStatus.ACTIVE: ("פעילה", "#2ecc71"),
     CameraStatus.DEAD: ("מתה", "#e67e22"),
     CameraStatus.OFFLINE: ("לא מחוברת", "#e74c3c"),
+    CameraStatus.AUTH_FAILED: ("שם משתמש/סיסמה שגויים", "#e74c3c"),
 }
 
 
@@ -56,7 +57,7 @@ class VideoTile(QWidget):
         self.title_label.setText(self.cfg.name)
         self.status_label.setText(f"● {text}")
         self.status_label.setStyleSheet(f"color:{color}; font-weight:bold; padding:2px;")
-        if status in (CameraStatus.OFFLINE, CameraStatus.DEAD):
+        if status in (CameraStatus.OFFLINE, CameraStatus.DEAD, CameraStatus.AUTH_FAILED):
             self.video_label.setText(text)
 
     def update_frame(self, frame):

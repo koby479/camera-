@@ -109,6 +109,26 @@ def enumerate_nvr_channels(nvr_cfg: CameraConfig) -> list[CameraConfig]:
 
     from urllib.parse import urlparse
 
+    from app.core.rtsp_auth import AuthResult, check_rtsp_auth
+
+    # ONVIF answering is NOT proof the credentials are right (many NVRs serve
+    # GetProfiles without auth). Verify with a real RTSP login on the first
+    # channel; fail loudly instead of showing a fake "connected" tree.
+    if channels:
+        p0 = urlparse(channels[0][1])
+        path0 = (p0.path or "/") + (f"?{p0.query}" if p0.query else "")
+        res = check_rtsp_auth(p0.hostname or nvr_cfg.host, p0.port or 554, path0,
+                              nvr_cfg.username, nvr_cfg.password)
+        if res == AuthResult.BAD_CREDENTIALS:
+            raise RuntimeError(
+                f"שם המשתמש או הסיסמה של ה-NVR ({nvr_cfg.host}) שגויים. "
+                f"ה-NVR מחזיר את רשימת הערוצים גם בלי אימות, אבל ההתחברות לווידאו נדחתה."
+            )
+        if res == AuthResult.UNREACHABLE:
+            raise RuntimeError(
+                f"ה-NVR ({nvr_cfg.host}) ענה ב-ONVIF אבל פורט הווידאו (RTSP) לא נגיש."
+            )
+
     result = []
     for name, uri in channels:
         parsed = urlparse(uri)
@@ -119,7 +139,7 @@ def enumerate_nvr_channels(nvr_cfg: CameraConfig) -> list[CameraConfig]:
                 port=parsed.port or 554,
                 username=nvr_cfg.username,
                 password=nvr_cfg.password,
-                rtsp_path=parsed.path or "/",
+                rtsp_path=(parsed.path or "/") + (f"?{parsed.query}" if parsed.query else ""),
                 parent_nvr_id=nvr_cfg.id,
             )
         )
