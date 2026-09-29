@@ -10,6 +10,7 @@ pyinstaller --noconfirm --onefile --windowed ^
     --collect-all numpy ^
     --collect-all cv2 ^
     --collect-all onvif ^
+    --collect-all av ^
     --add-data "%ONVIF_WSDL%;onvif\wsdl" ^
     --add-data "app;app" ^
     app\main.py

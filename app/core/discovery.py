@@ -65,14 +65,16 @@ def find_devices_on_network(timeout: float = 4.0) -> list[DiscoveredDevice]:
     return found
 
 
-async def _enumerate_async(host: str, onvif_port: int, username: str, password: str):
+async def _enumerate_async(host: str, onvif_port: int, username: str, password: str, state: dict):
     from onvif import ONVIFCamera  # onvif-zeep-async
 
+    state["step"] = "שליפת יכולות המכשיר (GetServices/GetCapabilities)"
     cam = ONVIFCamera(host, onvif_port, username, password, wsdl_dir=wsdl_dir(), no_cache=True)
-    await asyncio.wait_for(cam.update_xaddrs(), timeout=8)
+    await asyncio.wait_for(cam.update_xaddrs(), timeout=15)
 
+    state["step"] = "שליפת רשימת הפרופילים (GetProfiles)"
     media = await cam.create_media_service()
-    profiles = await asyncio.wait_for(media.GetProfiles(), timeout=8)
+    profiles = await asyncio.wait_for(media.GetProfiles(), timeout=15)
 
     channels = []
     for profile in profiles:
@@ -80,12 +82,52 @@ async def _enumerate_async(host: str, onvif_port: int, username: str, password: 
             "Stream": "RTP-Unicast",
             "Transport": {"Protocol": "RTSP"},
         }
+        state["step"] = f"שליפת כתובת הווידאו של ערוץ {profile.Name or profile.token} (GetStreamUri)"
         uri_resp = await asyncio.wait_for(
             media.GetStreamUri({"StreamSetup": stream_setup, "ProfileToken": profile.token}),
-            timeout=8,
+            timeout=15,
         )
         channels.append((profile.Name or profile.token, uri_resp.Uri))
     return channels
+
+
+def _enumerate_dvrip(nvr_cfg: CameraConfig) -> list[CameraConfig]:
+    """XM / Provision CMS protocol: log in (this really verifies the password)
+    and create one channel entry per ChannelNum the recorder reports."""
+    from app.core.dvrip import DVRIPClient, DVRIPAuthError, DVRIPError
+
+    client = DVRIPClient(nvr_cfg.host, nvr_cfg.port, nvr_cfg.username, nvr_cfg.password)
+    try:
+        client.connect()
+        info = client.login()
+    except DVRIPAuthError as exc:
+        raise RuntimeError(
+            f"שם המשתמש או הסיסמה של ה-NVR ({nvr_cfg.host}:{nvr_cfg.port}) שגויים ({exc.code})."
+        ) from exc
+    except DVRIPError as exc:
+        raise RuntimeError(f"ה-NVR ענה אבל לא כמו מכשיר XM/Provision: {exc}") from exc
+    except OSError as exc:
+        raise RuntimeError(
+            f"אין חיבור ל-{nvr_cfg.host}:{nvr_cfg.port} ({exc}). "
+            f"בדוק IP ופורט (ב-Provision CMS3 זה בדרך כלל 34567) ופורט-פורוורד בנתב."
+        ) from exc
+    finally:
+        client.close()
+
+    count = int(info.get("ChannelNum") or 0) or 1
+    return [
+        CameraConfig(
+            name=f"{nvr_cfg.name} / ערוץ {i + 1}",
+            host=nvr_cfg.host,
+            port=nvr_cfg.port,
+            username=nvr_cfg.username,
+            password=nvr_cfg.password,
+            protocol="dvrip",
+            channel=i,
+            parent_nvr_id=nvr_cfg.id,
+        )
+        for i in range(count)
+    ]
 
 
 def enumerate_nvr_channels(nvr_cfg: CameraConfig) -> list[CameraConfig]:
@@ -95,30 +137,70 @@ def enumerate_nvr_channels(nvr_cfg: CameraConfig) -> list[CameraConfig]:
     asyncio.wait_for) - callers on a GUI thread MUST run this in a background
     QThread (see app/ui/nvr_probe_worker.py), never call it directly from a
     Qt slot or the whole window will freeze while it waits."""
+    if nvr_cfg.protocol == "dvrip":
+        return _enumerate_dvrip(nvr_cfg)
+
+    import socket
+
+    # Step 0: plain TCP check, so "port closed / blocked" is told apart from
+    # "port open but ONVIF not answering".
+    try:
+        socket.create_connection((nvr_cfg.host, nvr_cfg.onvif_port), timeout=6).close()
+    except OSError as exc:
+        raise RuntimeError(
+            f"אין חיבור TCP ל-{nvr_cfg.host}:{nvr_cfg.onvif_port} ({exc}).\n"
+            f"הפורט סגור/חסום, או שזה לא פורט ה-ONVIF של ה-NVR. אם ב-NVR מאחורי נתב, "
+            f"צריך את הפורט החיצוני (פורט-פורוורד) שמוביל ל-ONVIF של ה-NVR."
+        ) from exc
+
+    state = {"step": ""}
     try:
         channels = asyncio.run(
-            _enumerate_async(nvr_cfg.host, nvr_cfg.onvif_port, nvr_cfg.username, nvr_cfg.password)
+            _enumerate_async(nvr_cfg.host, nvr_cfg.onvif_port, nvr_cfg.username, nvr_cfg.password, state)
         )
     except asyncio.TimeoutError as exc:
         raise RuntimeError(
-            f"ה-NVR ({nvr_cfg.host}) לא הגיב תוך 8 שניות. בדוק שה-IP/פורט ONVIF נכונים "
-            f"ושאין חומת אש שחוסמת."
+            f"הפורט {nvr_cfg.host}:{nvr_cfg.onvif_port} פתוח, אבל ה-NVR לא ענה בזמן בשלב: {state['step']}.\n"
+            f"אם השלב הוא GetProfiles/GetStreamUri, ה-NVR כנראה מחזיר כתובת פנימית (192.168...) "
+            f"שלא נגישה מבחוץ. הרץ tools\\diagnose_nvr.py כדי לראות בדיוק."
         ) from exc
     except Exception as exc:  # noqa: BLE001 - surfaced to the UI as a message box
-        raise RuntimeError(f"נכשל לתקשר עם ה-NVR ({nvr_cfg.host}) דרך ONVIF: {exc}") from exc
+        raise RuntimeError(
+            f"נכשל לתקשר עם ה-NVR ({nvr_cfg.host}) דרך ONVIF בשלב: {state['step']}.\n{exc}"
+        ) from exc
 
     from urllib.parse import urlparse
 
     from app.core.rtsp_auth import AuthResult, check_rtsp_auth
 
+    import ipaddress
+
+    def _is_private(h: str | None) -> bool:
+        try:
+            return ipaddress.ip_address(h).is_private if h else False
+        except ValueError:
+            return False
+
+    def _endpoint(uri: str):
+        """Behind NAT the NVR advertises its LAN address (192.168.x.x) in the
+        stream URI. From outside that is unreachable, so use the address the
+        user configured (and the configured RTSP port) instead."""
+        parsed = urlparse(uri)
+        path = (parsed.path or "/") + (f"?{parsed.query}" if parsed.query else "")
+        if parsed.hostname and parsed.hostname != nvr_cfg.host and (
+            _is_private(parsed.hostname) and not _is_private(nvr_cfg.host)
+        ):
+            return nvr_cfg.host, nvr_cfg.port, path
+        return parsed.hostname or nvr_cfg.host, parsed.port or 554, path
+
+    endpoints = [(name, *_endpoint(uri)) for name, uri in channels]
+
     # ONVIF answering is NOT proof the credentials are right (many NVRs serve
     # GetProfiles without auth). Verify with a real RTSP login on the first
     # channel; fail loudly instead of showing a fake "connected" tree.
-    if channels:
-        p0 = urlparse(channels[0][1])
-        path0 = (p0.path or "/") + (f"?{p0.query}" if p0.query else "")
-        res = check_rtsp_auth(p0.hostname or nvr_cfg.host, p0.port or 554, path0,
-                              nvr_cfg.username, nvr_cfg.password)
+    if endpoints:
+        _, h0, port0, path0 = endpoints[0]
+        res = check_rtsp_auth(h0, port0, path0, nvr_cfg.username, nvr_cfg.password)
         if res == AuthResult.BAD_CREDENTIALS:
             raise RuntimeError(
                 f"שם המשתמש או הסיסמה של ה-NVR ({nvr_cfg.host}) שגויים. "
@@ -126,20 +208,20 @@ def enumerate_nvr_channels(nvr_cfg: CameraConfig) -> list[CameraConfig]:
             )
         if res == AuthResult.UNREACHABLE:
             raise RuntimeError(
-                f"ה-NVR ({nvr_cfg.host}) ענה ב-ONVIF אבל פורט הווידאו (RTSP) לא נגיש."
+                f"ה-NVR ענה ב-ONVIF, אבל פורט הווידאו (RTSP) {h0}:{port0} לא נגיש.\n"
+                f"ערוך את ה-NVR ובדוק את שדה 'פורט RTSP' (הפורט החיצוני שמוביל ל-554 של ה-NVR)."
             )
 
     result = []
-    for name, uri in channels:
-        parsed = urlparse(uri)
+    for name, h, port, path in endpoints:
         result.append(
             CameraConfig(
                 name=f"{nvr_cfg.name} / {name}",
-                host=parsed.hostname or nvr_cfg.host,
-                port=parsed.port or 554,
+                host=h,
+                port=port,
                 username=nvr_cfg.username,
                 password=nvr_cfg.password,
-                rtsp_path=(parsed.path or "/") + (f"?{parsed.query}" if parsed.query else ""),
+                rtsp_path=path,
                 parent_nvr_id=nvr_cfg.id,
             )
         )

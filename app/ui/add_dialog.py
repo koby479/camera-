@@ -52,11 +52,23 @@ class AddDeviceDialog(QDialog):
             if idx >= 0:
                 self.transport_combo.setCurrentIndex(idx)
 
+        self.protocol_combo = QComboBox()
+        self.protocol_combo.addItem("ONVIF (סטנדרטי)", "onvif")
+        self.protocol_combo.addItem("XM / Provision CMS (פורט 34567)", "dvrip")
+        if existing_cfg and existing_cfg.protocol == "dvrip":
+            self.protocol_combo.setCurrentIndex(1)
+        self.onvif_label = QLabel("פורט ONVIF (לרוב 80):")
+        self.port_label = QLabel()
+
         form = QFormLayout()
         form.addRow("שם:", self.name_edit)
         form.addRow("כתובת IP:", self.host_edit)
         if is_nvr:
-            form.addRow("פורט ONVIF (לרוב 80):", self.onvif_port_spin)
+            form.addRow("סוג חיבור:", self.protocol_combo)
+            form.addRow(self.onvif_label, self.onvif_port_spin)
+            form.addRow(self.port_label, self.rtsp_port_spin)
+            self.protocol_combo.currentIndexChanged.connect(self._on_protocol_changed)
+            self._on_protocol_changed(initial=True)
             note = QLabel("התוכנה תתחבר דרך ONVIF ותביא אוטומטית את כל הערוצים המחוברים ל-NVR.")
             note.setWordWrap(True)
         else:
@@ -79,6 +91,20 @@ class AddDeviceDialog(QDialog):
         layout.addLayout(form)
         layout.addWidget(buttons)
 
+    def _on_protocol_changed(self, *_args, initial: bool = False):
+        dvrip = self.protocol_combo.currentData() == "dvrip"
+        self.onvif_label.setVisible(not dvrip)
+        self.onvif_port_spin.setVisible(not dvrip)
+        if dvrip:
+            self.port_label.setText("פורט XM/Provision (לרוב 34567):")
+            if not initial or self.rtsp_port_spin.value() == 554:
+                if self.rtsp_port_spin.value() == 554:
+                    self.rtsp_port_spin.setValue(34567)
+        else:
+            self.port_label.setText("פורט RTSP (לרוב 554, בגישה מרחוק - הפורט החיצוני):")
+            if self.rtsp_port_spin.value() == 34567:
+                self.rtsp_port_spin.setValue(554)
+
     def to_config(self) -> CameraConfig:
         # editing an existing device: keep its id (and parent_nvr_id) so the
         # sidebar/grid/worker all still recognize it as "the same camera"
@@ -92,6 +118,8 @@ class AddDeviceDialog(QDialog):
                 name=self.name_edit.text().strip() or "NVR",
                 host=self.host_edit.text().strip(),
                 onvif_port=self.onvif_port_spin.value(),
+                port=self.rtsp_port_spin.value(),
+                protocol=self.protocol_combo.currentData(),
                 username=self.user_edit.text(),
                 password=self.pass_edit.text(),
                 **base_kwargs,

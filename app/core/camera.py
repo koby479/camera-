@@ -42,6 +42,9 @@ class CameraConfig:
     onvif_port: int = 80          # used only for discovery / re-probing, not for the stream
     parent_nvr_id: str | None = None   # None => "single camera" entry, else id of the owning NVR
     transport: str = "tcp"        # tcp | udp
+    protocol: str = "rtsp"        # NVR: "onvif" | "dvrip" (XM/Provision, port 34567); camera: "rtsp" | "dvrip"
+    channel: int = 0              # channel index (0-based) for protocol == "dvrip"
+    stream: str = "Main"          # "Main" | "Extra1" (sub-stream) for protocol == "dvrip"
 
     @property
     def rtsp_url(self) -> str:
@@ -125,7 +128,63 @@ class CameraWorker(QThread):
                 return cap
         return None
 
+    def _run_dvrip(self):
+        """XM / Provision CMS protocol (port 34567). Same status semantics as RTSP."""
+        import sys
+        from app.core import dvrip
+
+        retry_delay = 3
+        try:
+            decoder_cls = dvrip.H264Decoder
+            decoder_cls()          # fail early if PyAV is missing
+        except Exception as exc:  # noqa: BLE001
+            print(f"[dvrip] H.264 decoder unavailable (pip install av): {exc}", file=sys.stderr)
+            self._emit_status(CameraStatus.DEAD)
+            return
+
+        while self._running:
+            client = dvrip.DVRIPClient(self.cfg.host, self.cfg.port, self.cfg.username, self.cfg.password)
+            try:
+                client.connect()
+                client.login()
+            except dvrip.DVRIPAuthError:
+                self._emit_status(CameraStatus.AUTH_FAILED)
+                client.close()
+                time.sleep(retry_delay)
+                continue
+            except OSError:
+                self._emit_status(CameraStatus.OFFLINE)
+                client.close()
+                time.sleep(retry_delay)
+                continue
+            except dvrip.DVRIPError as exc:
+                print(f"[dvrip] login failed: {exc}", file=sys.stderr)
+                self._emit_status(CameraStatus.DEAD)
+                client.close()
+                time.sleep(retry_delay)
+                continue
+
+            try:
+                client.start_monitor(self.cfg.channel, self.cfg.stream)
+                parser, decoder = dvrip.XMFrameParser(), dvrip.H264Decoder()
+                for chunk in client.read_video_payloads():
+                    if not self._running:
+                        break
+                    client.keepalive_if_due()
+                    for video in parser.feed(chunk):
+                        for frame in decoder.decode(video):
+                            self._emit_status(CameraStatus.ACTIVE)
+                            self.frame_ready.emit(self.cfg.id, frame)
+            except (OSError, dvrip.DVRIPError) as exc:
+                print(f"[dvrip] stream ended: {exc}", file=sys.stderr)
+                self._emit_status(CameraStatus.DEAD)
+            finally:
+                client.close()
+            time.sleep(retry_delay)
+
     def run(self):
+        if self.cfg.protocol == "dvrip":
+            return self._run_dvrip()
         retry_delay = 3
         while self._running:
             if not self._tcp_reachable():

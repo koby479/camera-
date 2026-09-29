@@ -19,6 +19,11 @@ pip install -r requirements.txt
 python -m app.main
 ```
 
+## מכשירי XM / Provision CMS (פורט 34567)
+ב"הוסף NVR" בחר "סוג חיבור: XM / Provision CMS" והזן את אותם IP, פורט (34567), משתמש וסיסמה כמו ב-CMS3.
+נדרש `av` (מותקן דרך requirements.txt) לפענוח H.264.
+לאבחון: `python tools/diagnose_nvr.py IP --user X --password Y --stream-test`
+
 ## בניית EXE
 הרץ `build_exe.bat` בתוך סביבת venv עם התלויות מותקנות. הקובץ הסופי יופיע ב-`dist\UniversalCamViewer.exe`.
 
