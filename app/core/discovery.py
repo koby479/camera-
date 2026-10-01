@@ -123,6 +123,7 @@ def _enumerate_dvrip(nvr_cfg: CameraConfig) -> list[CameraConfig]:
             username=nvr_cfg.username,
             password=nvr_cfg.password,
             protocol="dvrip",
+            stream="Extra1",          # light sub-stream in the grid; Main on double-click
             channel=i,
             parent_nvr_id=nvr_cfg.id,
         )

@@ -138,6 +138,7 @@ def stream_test(host, port, user, pw):
         c.login()
         c.start_monitor(0, "Main", first_data_timeout=8)
         parser, seen, first = dvrip.XMFrameParser(), 0, []
+        audio_info: dict = {}
         import time
         end = time.monotonic() + 4
         try:
@@ -146,11 +147,21 @@ def stream_test(host, port, user, pw):
                     first.append(chunk[:48].hex(" "))
                 if chunk:
                     seen += len(parser.feed(chunk))
+                    for media, rate, body in parser.audio:
+                        audio_info.setdefault((media, rate), [0, 0])
+                        audio_info[(media, rate)][0] += 1
+                        audio_info[(media, rate)][1] += len(body)
+                    parser.audio = []
                 if time.monotonic() > end:
                     break
         except (OSError, dvrip.DVRIPError) as exc:
             print("   הזרם נסגר:", exc)
         print("   וידאו: התקבלו", seen, "פריימים תקינים ב-4 שניות")
+        if audio_info:
+            for (media, rate), (n, size) in audio_info.items():
+                print(f"   שמע: {n} פריימים ({size} בייט), סוג 0x{media:02X}, {rate} Hz")
+        else:
+            print("   שמע: לא התקבלו פריימי שמע (ייתכן שהשמע כבוי בהגדרות הקידוד של ערוץ 1 ב-NVR)")
         for i, h in enumerate(first):
             print(f"   בייטים ראשונים #{i + 1}: {h}")
     except Exception as exc:  # noqa: BLE001

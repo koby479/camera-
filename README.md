@@ -11,6 +11,10 @@
 - `build_exe.bat` - אריזה ל-EXE בודד עם PyInstaller (להריץ על Windows)
 - `uninstall.bat` - הסרה נקייה (מוחק את קובץ ה-JSON השמור ומציע למחוק את ה-EXE)
 
+## הרצה רגילה (בלי פקודות)
+לחיצה כפולה על `start.pyw`. כדי לקבל אייקון בשולחן העבודה: לחיצה כפולה על `create_shortcut.bat` (פעם אחת).
+שגיאות נשמרות ב-`%LOCALAPPDATA%\UniversalCamViewer\app.log`.
+
 ## הרצה בפיתוח
 ```
 python -m venv .venv

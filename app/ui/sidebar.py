@@ -3,7 +3,7 @@ from __future__ import annotations
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QTreeWidget, QTreeWidgetItem, QPushButton,
-    QHBoxLayout, QMenu
+    QHBoxLayout, QMenu, QInputDialog, QMessageBox
 )
 
 from app.core.camera import CameraConfig
@@ -20,6 +20,11 @@ class Sidebar(QWidget):
     camera_toggle_requested = pyqtSignal(object)    # CameraConfig, add/remove from grid
     remove_device_requested = pyqtSignal(object, str)  # CameraConfig, kind
     edit_device_requested = pyqtSignal(object, str)    # CameraConfig, kind
+    renamed = pyqtSignal(object, str)                  # CameraConfig (already renamed), kind
+    playback_requested = pyqtSignal(object, str)       # CameraConfig, kind
+    connect_all_requested = pyqtSignal(object, bool)   # NVR CameraConfig, use main stream
+    disconnect_all_requested = pyqtSignal()
+    grid_fullscreen_requested = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -48,9 +53,19 @@ class Sidebar(QWidget):
         scan_btn = QPushButton("🔍 סרוק רשת")
         scan_btn.clicked.connect(self.scan_network_requested.emit)
 
+        playback_btn = QPushButton("📼 צפייה בהקלטות (לאחור)")
+        playback_btn.setToolTip("בחר ערוץ ברשימה ולחץ. אפשר גם קליק ימני על מצלמה")
+        playback_btn.clicked.connect(self._on_playback_clicked)
+
+        full_btn = QPushButton("⛶ כל המצלמות במסך מלא (F11)")
+        full_btn.setToolTip("מסתיר את הרשימה ומציג את כל המצלמות על כל המסך. Esc או F11 חוזרים")
+        full_btn.clicked.connect(self.grid_fullscreen_requested.emit)
+
         layout = QVBoxLayout(self)
         layout.addLayout(btn_row)
         layout.addWidget(scan_btn)
+        layout.addWidget(playback_btn)
+        layout.addWidget(full_btn)
         layout.addWidget(self.tree)
 
     # ---- population -------------------------------------------------
@@ -107,19 +122,64 @@ class Sidebar(QWidget):
         elif kind in ("nvr_channel", "single"):
             self.camera_toggle_requested.emit(cfg)
 
+    def _on_playback_clicked(self):
+        item = self.tree.currentItem()
+        kind = item.data(0, ROLE_KIND) if item is not None else None
+        if kind not in ("nvr", "nvr_channel", "single"):
+            QMessageBox.information(self, "צפייה בהקלטות", "בחר קודם ערוץ (או NVR) מהרשימה, ואז לחץ שוב.")
+            return
+        self.playback_requested.emit(item.data(0, ROLE_CFG), kind)
+
+    def _item_text(self, cfg: CameraConfig, kind: str) -> str:
+        if kind == "nvr":
+            return f"🖥 {cfg.name} ({cfg.host})"
+        if kind == "single":
+            return f"📷 {cfg.name} ({cfg.host})"
+        return f"📷 {cfg.name}"
+
     def _on_context_menu(self, pos):
         item = self.tree.itemAt(pos)
         if item is None:
             return
         kind = item.data(0, ROLE_KIND)
         cfg = item.data(0, ROLE_CFG)
-        if kind not in ("nvr", "single"):
+        if kind not in ("nvr", "nvr_channel", "single"):
             return
         menu = QMenu(self)
-        edit_action = menu.addAction("✏ עריכת פרטי התחברות")
-        remove_action = menu.addAction("🗑 הסר")
+        rename_action = menu.addAction("🏷 שנה שם")
+        play_action = None
+        if cfg.protocol == "dvrip" or kind == "nvr_channel":
+            play_action = menu.addAction("📼 צפייה בהקלטות")
+        all_sub = all_main = all_off = None
+        if kind == "nvr":
+            menu.addSeparator()
+            all_sub = menu.addAction("🔗 התחבר לכל הערוצים (זרם משני, קל)")
+            all_main = menu.addAction("🔗 התחבר לכל הערוצים (זרם ראשי, כבד)")
+            all_off = menu.addAction("⛔ התנתק מכל המקורות")
+        edit_action = remove_action = None
+        if kind in ("nvr", "single"):
+            menu.addSeparator()
+            edit_action = menu.addAction("✏ עריכת פרטי התחברות")
+            remove_action = menu.addAction("🗑 הסר")
         chosen = menu.exec(self.tree.viewport().mapToGlobal(pos))
-        if chosen == remove_action:
+        if chosen is None:
+            return
+        if chosen == rename_action:
+            new, ok = QInputDialog.getText(self, "שינוי שם", "שם חדש:", text=cfg.name)
+            new = new.strip()
+            if ok and new:
+                cfg.name = new
+                item.setText(0, self._item_text(cfg, kind))
+                self.renamed.emit(cfg, kind)
+        elif all_sub is not None and chosen == all_sub:
+            self.connect_all_requested.emit(cfg, False)
+        elif all_main is not None and chosen == all_main:
+            self.connect_all_requested.emit(cfg, True)
+        elif all_off is not None and chosen == all_off:
+            self.disconnect_all_requested.emit()
+        elif chosen == play_action:
+            self.playback_requested.emit(cfg, kind)
+        elif chosen == remove_action:
             self.remove_device_requested.emit(cfg, kind)
         elif chosen == edit_action:
             self.edit_device_requested.emit(cfg, kind)

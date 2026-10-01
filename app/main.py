@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import sys
+from collections import deque
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QSplitter, QMessageBox
 )
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtGui import QKeyEvent, QKeySequence, QShortcut
 
 from app.core.camera import CameraConfig, CameraWorker, CameraStatus
 from app.core.store import load_all, save_all, DEFAULT_MAX_TILES
@@ -15,6 +17,9 @@ from app.ui.video_tile import VideoTile
 from app.ui.add_dialog import AddDeviceDialog
 from app.ui.scan_dialog import ScanDialog
 from app.ui.nvr_probe_worker import NvrProbeWorker
+from app.core.audio import AudioPlayer
+from app.core import names
+from app.ui.playback_dialog import PlaybackDialog
 
 
 class MainWindow(QMainWindow):
@@ -28,6 +33,17 @@ class MainWindow(QMainWindow):
         self.nvr_items = {}   # nvr id -> tree item, for populating channels later
         self.single_items = {}  # single-camera id -> tree item, so edits can update the label in place
         self.nvr_probe_workers: dict[str, NvrProbeWorker] = {}   # keep refs alive while running
+        self.audio_player = AudioPlayer()
+        self.audio_camera_id: str | None = None   # only one camera is audible at a time
+        self.playback_dialogs: list[PlaybackDialog] = []
+        self._was_maximized = False
+        self._grid_full = False                            # whole window full screen, all cameras visible
+        self._session_hidden: set[str] = set()             # removed from view this session only; never saved
+        self._connect_all_pending: dict[str, bool] = {}   # nvr id -> main stream? (waiting for the channel list)
+        self._connect_queue: deque = deque()               # (CameraConfig, main) opened one at a time
+        self._connect_timer = QTimer(self)                 # staggered so the PC and the NVR are not hit at once
+        self._connect_timer.setInterval(400)
+        self._connect_timer.timeout.connect(self._connect_next)
 
         self.sidebar = Sidebar()
         self.grid = VideoGrid()
@@ -46,6 +62,12 @@ class MainWindow(QMainWindow):
         self.sidebar.camera_toggle_requested.connect(self.on_toggle_camera)
         self.sidebar.remove_device_requested.connect(self.on_remove_device)
         self.sidebar.edit_device_requested.connect(self.on_edit_device)
+        self.sidebar.renamed.connect(self._on_renamed)
+        self.sidebar.playback_requested.connect(self.on_playback)
+        self.sidebar.connect_all_requested.connect(self.on_connect_all)
+        self.sidebar.grid_fullscreen_requested.connect(self._toggle_grid_fullscreen)
+        QShortcut(QKeySequence("F11"), self, activated=self._on_f11)
+        self.sidebar.disconnect_all_requested.connect(self._close_all_tiles)
 
         for nvr in self.nvrs:
             item = self.sidebar.add_nvr_node(nvr)
@@ -108,6 +130,11 @@ class MainWindow(QMainWindow):
         if item is None:
             return
         item.setText(0, f"🖥 {nvr_cfg.name} ({nvr_cfg.host})")
+        for ch in channels:
+            saved = names.get_name(nvr_cfg.id, ch.channel)
+            if saved:
+                ch.name = saved
+        pending_main = self._connect_all_pending.pop(nvr_cfg.id, None)
         if not channels:
             QMessageBox.information(
                 self, "אין ערוצים",
@@ -115,14 +142,57 @@ class MainWindow(QMainWindow):
             )
             return
         self.sidebar.set_nvr_channels(item, channels)
+        if pending_main is not None:
+            self._start_channels(channels, pending_main)
 
     def _on_nvr_probe_failed(self, nvr_cfg: CameraConfig, error: str):
+        self._connect_all_pending.pop(nvr_cfg.id, None)
         item = self.nvr_items.get(nvr_cfg.id)
         if item is not None:
             item.setText(0, f"🖥 {nvr_cfg.name} ({nvr_cfg.host})")
         QMessageBox.warning(self, "שגיאת חיבור ל-NVR", error)
 
-    def on_toggle_camera(self, cfg: CameraConfig):
+    # ---- connect to every channel of an NVR with one click ----------------
+    def on_connect_all(self, nvr_cfg: CameraConfig, main: bool):
+        if main:
+            resp = QMessageBox.question(
+                self, "זרם ראשי בכל הערוצים",
+                "הזרם הראשי הוא באיכות מלאה (עד 4K) ופענוח שלו בכל הערוצים יכביד מאוד על המחשב. "
+                "מומלץ זרם משני. להמשיך בכל זאת?",
+            )
+            if resp != QMessageBox.StandardButton.Yes:
+                return
+        item = self.nvr_items.get(nvr_cfg.id)
+        channels = []
+        if item is not None:
+            for i in range(item.childCount()):
+                ch = item.child(i).data(0, Qt.ItemDataRole.UserRole + 1)
+                if isinstance(ch, CameraConfig):
+                    channels.append(ch)
+        if channels:
+            self._start_channels(channels, main)
+        else:                                   # channel list not loaded yet: load it, then connect
+            self._connect_all_pending[nvr_cfg.id] = main
+            self.on_expand_nvr(nvr_cfg)
+
+    def _start_channels(self, channels: list[CameraConfig], main: bool):
+        for ch in channels:
+            if not self.grid.has_tile(ch.id) and ch.id not in self._session_hidden:
+                self._connect_queue.append((ch, main))
+        if self._connect_queue and not self._connect_timer.isActive():
+            self._connect_next()
+            self._connect_timer.start()
+
+    def _connect_next(self):
+        while self._connect_queue:
+            cfg, main = self._connect_queue.popleft()
+            if not self.grid.has_tile(cfg.id):       # toggling an open channel would close it
+                self.on_toggle_camera(cfg, main)
+                return
+        self._connect_timer.stop()
+
+    def on_toggle_camera(self, cfg: CameraConfig, main: bool = False):
+        self._session_hidden.discard(cfg.id)      # asking for this camera explicitly brings it back
         if self.grid.has_tile(cfg.id):
             self.remove_camera_tile(cfg.id)
             return
@@ -136,16 +206,36 @@ class MainWindow(QMainWindow):
                 return
 
         tile = VideoTile(cfg)
+        tile.grid_full = self._grid_full
+        tile.audio_toggled.connect(self._on_audio_toggled)
+        tile.activated.connect(self._on_tile_activated)
+        tile.hd_toggled.connect(self._on_hd_toggled)
+        tile.playback_requested.connect(self._on_tile_playback)
+        tile.close_requested.connect(self._close_tile)
+        tile.close_all_requested.connect(self._close_all_tiles)
+        tile.hide_requested.connect(self._hide_tile)
+        tile.hide_dead_requested.connect(self._hide_dead_tiles)
+        tile.grid_fullscreen_requested.connect(self._toggle_grid_fullscreen)
         self.grid.add_tile(tile)
 
         worker = CameraWorker(cfg)
         worker.frame_ready.connect(self._on_frame)
         worker.status_changed.connect(self._on_status)
         worker.path_resolved.connect(self._on_path_resolved)
+        worker.audio_ready.connect(self._on_audio)
+        if main and cfg.protocol == "dvrip":     # open straight on the main stream, no restart later
+            worker.force_main = True
+            worker._update_width()
+            tile.hd_btn.blockSignals(True)
+            tile.hd_btn.setChecked(True)
+            tile.hd_btn.blockSignals(False)
         self.workers[cfg.id] = worker
         worker.start()
 
     def remove_camera_tile(self, camera_id: str):
+        if self.audio_camera_id == camera_id:
+            self.audio_camera_id = None
+            self.audio_player.stop()
         worker = self.workers.pop(camera_id, None)
         if worker:
             worker.stop()
@@ -199,6 +289,161 @@ class MainWindow(QMainWindow):
         tile = self.grid.tiles.get(camera_id)
         if tile:
             tile.update_frame(frame)
+        w = self.workers.get(camera_id)
+        if w:
+            w.pending = False        # GUI is done with this frame -> worker may send the next one
+
+    def _on_tile_activated(self, camera_id: str):
+        """Double-click a tile: enlarge it; again: back to the grid. Enlarging does NOT switch to
+        the heavy main stream any more -- that is the tile's own 'HD' button."""
+        entering = self.grid.focus_id != camera_id
+        self.grid.set_focus(camera_id if entering else None)
+        for cid, t in self.grid.tiles.items():
+            t.fullscreen = entering and cid == camera_id
+        if entering:                       # real full screen: hide the sidebar and the title bar
+            if not self._grid_full:        # already full screen with the grid? keep the saved state
+                self._was_maximized = self.isMaximized()
+            self.sidebar.hide()
+            self.showFullScreen()
+        elif not self._grid_full:          # back to the grid; stay full screen if that is how we came in
+            self.sidebar.show()
+            self.showMaximized() if self._was_maximized else self.showNormal()
+        for cid, w in self.workers.items():
+            w.render = (not entering) or cid == camera_id
+            if cid == camera_id:
+                w.set_focused(entering)
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape:
+            if self.grid.focus_id:
+                self._on_tile_activated(self.grid.focus_id)  # Esc leaves the single-camera view first
+                return
+            if self._grid_full:
+                self._toggle_grid_fullscreen()
+                return
+        super().keyPressEvent(event)
+
+    def _on_f11(self):
+        if self.grid.focus_id:                               # from one enlarged camera: back to the grid
+            self._on_tile_activated(self.grid.focus_id)
+        else:
+            self._toggle_grid_fullscreen()
+
+    def _toggle_grid_fullscreen(self):
+        """All cameras on the whole screen (sidebar and title bar hidden). Esc / F11 / the tile
+        menu bring everything back."""
+        if self.grid.focus_id:
+            self._on_tile_activated(self.grid.focus_id)
+        if self._grid_full:
+            self._grid_full = False
+            self.sidebar.show()
+            self.showMaximized() if self._was_maximized else self.showNormal()
+        else:
+            self._was_maximized = self.isMaximized()
+            self._grid_full = True
+            self.sidebar.hide()
+            self.showFullScreen()
+        for tile in self.grid.tiles.values():
+            tile.grid_full = self._grid_full
+
+    def _leave_fullscreen(self):
+        if self.grid.focus_id:
+            self._on_tile_activated(self.grid.focus_id)
+
+    def _close_tile(self, camera_id: str):
+        self._leave_fullscreen()              # otherwise the window stays full screen with an empty grid
+        self.remove_camera_tile(camera_id)
+
+    BROKEN = (CameraStatus.OFFLINE, CameraStatus.DEAD, CameraStatus.AUTH_FAILED)
+
+    def _hide_tile(self, camera_id: str):
+        """Remove a broken camera from the grid. Only for this run: it is not deleted from the saved
+        list, so the next start of the program shows every camera again."""
+        self._session_hidden.add(camera_id)
+        self._close_tile(camera_id)
+
+    def _hide_dead_tiles(self):
+        ids = [cid for cid, t in self.grid.tiles.items() if t.status in self.BROKEN]
+        for cid in ids:
+            self._session_hidden.add(cid)
+        self._connect_queue = deque(x for x in self._connect_queue if x[0].id not in self._session_hidden)
+        if ids:
+            self._leave_fullscreen()
+        for cid in ids:
+            self.remove_camera_tile(cid)
+
+    def _close_all_tiles(self):
+        self._connect_queue.clear()
+        self._connect_all_pending.clear()
+        self._connect_timer.stop()
+        self._leave_fullscreen()
+        for cid in list(self.workers):
+            self.remove_camera_tile(cid)
+
+    def _on_tile_playback(self, cfg: CameraConfig):
+        self._leave_fullscreen()
+        self.on_playback(cfg, "nvr_channel" if cfg.parent_nvr_id else "single")
+
+    def _on_hd_toggled(self, camera_id: str, on: bool):
+        w = self.workers.get(camera_id)
+        if w and w.cfg.protocol == "dvrip":
+            w.set_quality(main=on)
+
+    def _on_renamed(self, cfg: CameraConfig, kind: str):
+        if kind == "nvr_channel":
+            names.set_name(cfg.parent_nvr_id, cfg.channel, cfg.name)
+        else:
+            save_all(self.nvrs, self.singles)
+        tile = self.grid.tiles.get(cfg.id)
+        if tile:
+            tile.set_title(cfg.name)
+
+    def on_playback(self, cfg: CameraConfig, kind: str):
+        if kind == "nvr_channel":
+            nvr = next((n for n in self.nvrs if n.id == cfg.parent_nvr_id), None)
+            channel = cfg.channel
+        else:
+            nvr, channel = cfg, cfg.channel
+        if nvr is None or nvr.protocol != "dvrip":
+            QMessageBox.information(self, "הקלטות", "צפייה בהקלטות זמינה כרגע רק ל-NVR מסוג XM / Provision.")
+            return
+        item = self.nvr_items.get(nvr.id)
+        channels = []
+        if item is not None:
+            for i in range(item.childCount()):
+                ch = item.child(i).data(0, Qt.ItemDataRole.UserRole + 1)
+                if isinstance(ch, CameraConfig):
+                    channels.append((ch.channel, ch.name))
+        if not channels:
+            channels = [(i, f"ערוץ {i + 1}") for i in range(16)]
+            channels = [(i, names.get_name(nvr.id, i) or label) for i, label in channels]
+        dlg = PlaybackDialog(nvr, channels, channel, self)
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        dlg.finished.connect(lambda _r, d=dlg: self.playback_dialogs.remove(d) if d in self.playback_dialogs else None)
+        self.playback_dialogs.append(dlg)
+        dlg.show()
+
+    def _on_audio_toggled(self, camera_id: str, on: bool):
+        if on:
+            prev = self.audio_camera_id
+            if prev and prev != camera_id:
+                if prev in self.workers:
+                    self.workers[prev].audio_enabled = False
+                if prev in self.grid.tiles:
+                    self.grid.tiles[prev].set_audio_on(False)
+            self.audio_player.stop()
+            self.audio_camera_id = camera_id
+            if camera_id in self.workers:
+                self.workers[camera_id].audio_enabled = True
+        elif self.audio_camera_id == camera_id:
+            self.audio_camera_id = None
+            if camera_id in self.workers:
+                self.workers[camera_id].audio_enabled = False
+            self.audio_player.stop()
+
+    def _on_audio(self, camera_id: str, pcm: bytes, rate: int):
+        if camera_id == self.audio_camera_id:
+            self.audio_player.write(pcm, rate)
 
     def _on_status(self, camera_id: str, status: CameraStatus):
         tile = self.grid.tiles.get(camera_id)
@@ -218,6 +463,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         for worker in self.workers.values():
             worker.stop()
+        self.audio_player.stop()
         save_all(self.nvrs, self.singles)
         super().closeEvent(event)
 

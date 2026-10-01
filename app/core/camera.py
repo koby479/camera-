@@ -19,6 +19,12 @@ from enum import Enum
 
 import cv2
 from PyQt6.QtCore import QThread, pyqtSignal
+from PyQt6.QtGui import QImage
+
+
+# (host, port, channel) of channels whose NVR has no usable sub-stream. Remembered for the
+# whole session so re-opening a tile does not waste ~12 s probing the sub-stream again.
+NO_SUB: set = set()
 
 
 class CameraStatus(Enum):
@@ -60,6 +66,7 @@ class CameraWorker(QThread):
     frame_ready = pyqtSignal(str, object)          # camera_id, numpy frame (BGR)
     status_changed = pyqtSignal(str, object)        # camera_id, CameraStatus
     path_resolved = pyqtSignal(str, str)            # camera_id, working rtsp_path (only on 'auto')
+    audio_ready = pyqtSignal(str, bytes, int)       # camera_id, PCM16 mono, sample rate (dvrip only)
 
     def __init__(self, cfg: CameraConfig, parent=None):
         super().__init__(parent)
@@ -67,6 +74,27 @@ class CameraWorker(QThread):
         self._running = True
         self._last_status: CameraStatus | None = None
         self._resolved_path: str | None = None   # local, thread-owned -- never mutate self.cfg directly
+        self.audio_enabled = False               # flipped from the GUI thread (plain bool, safe)
+        self.pending = False        # True while the GUI still owns the last frame -> newer ones are dropped
+        self.render = True          # False while the tile is hidden (focus mode): skip the costly conversion
+        self.max_width = 640        # frames are scaled down to this width in the worker thread
+        self.force_main = False     # True = "HD" button: use the full-quality main stream (heavy!)
+        self.focused = False        # True = tile is enlarged
+        self._restart = False
+        self._no_sub = False        # the NVR has no usable sub-stream -> always use Main
+
+    def _update_width(self):
+        self.max_width = 1600 if self.force_main else (1280 if self.focused else 640)
+
+    def set_focused(self, focused: bool):
+        self.focused = focused
+        self._update_width()
+
+    def set_quality(self, main: bool):
+        """Switch between the light sub-stream and the (possibly 4K) main stream."""
+        self.force_main = main
+        self._update_width()
+        self._restart = True
 
     def stop(self):
         self._running = False
@@ -133,16 +161,22 @@ class CameraWorker(QThread):
         import sys
         from app.core import dvrip
 
-        retry_delay = 3
         try:
-            decoder_cls = dvrip.H264Decoder
-            decoder_cls()          # fail early if PyAV is missing
+            dvrip.H264Decoder()          # fail early if PyAV is missing
         except Exception as exc:  # noqa: BLE001
-            print(f"[dvrip] H.264 decoder unavailable (pip install av): {exc}", file=sys.stderr)
+            print(f"[dvrip] video decoder unavailable (pip install av): {exc}", file=sys.stderr)
             self._emit_status(CameraStatus.DEAD)
             return
 
+        delay = 3.0                       # grows while the channel keeps failing (empty channels)
+
+        def wait(seconds):
+            end = time.monotonic() + seconds
+            while self._running and time.monotonic() < end:
+                time.sleep(0.2)
+
         while self._running:
+            self._restart = False
             client = dvrip.DVRIPClient(self.cfg.host, self.cfg.port, self.cfg.username, self.cfg.password)
             try:
                 client.connect()
@@ -150,37 +184,79 @@ class CameraWorker(QThread):
             except dvrip.DVRIPAuthError:
                 self._emit_status(CameraStatus.AUTH_FAILED)
                 client.close()
-                time.sleep(retry_delay)
+                wait(delay)
                 continue
             except OSError:
                 self._emit_status(CameraStatus.OFFLINE)
                 client.close()
-                time.sleep(retry_delay)
+                wait(delay)
                 continue
             except dvrip.DVRIPError as exc:
                 print(f"[dvrip] login failed: {exc}", file=sys.stderr)
                 self._emit_status(CameraStatus.DEAD)
                 client.close()
-                time.sleep(retry_delay)
+                wait(delay)
                 continue
 
+            key = (self.cfg.host, self.cfg.port, self.cfg.channel)
+            stream = "Main" if (self.force_main or self._no_sub or key in NO_SUB) else self.cfg.stream
+            got_video = False
             try:
-                client.start_monitor(self.cfg.channel, self.cfg.stream)
+                client.start_monitor(self.cfg.channel, stream)
                 parser, decoder = dvrip.XMFrameParser(), dvrip.H264Decoder()
+                logged_audio = False
+                video_seen, decoded_any = 0, False
                 for chunk in client.read_video_payloads():
-                    if not self._running:
+                    if not self._running or self._restart:
                         break
                     client.keepalive_if_due()
-                    for video in parser.feed(chunk):
-                        for frame in decoder.decode(video):
+                    video_frames = parser.feed(chunk)
+                    audio, parser.audio = parser.audio, []
+                    for media, rate, payload in audio:
+                        if not logged_audio:
+                            logged_audio = True
+                            print(f"[dvrip] audio stream: media=0x{media:02X} rate={rate} Hz", file=sys.stderr)
+                        if self.audio_enabled:
+                            self.audio_ready.emit(self.cfg.id, dvrip.alaw_to_pcm16(payload), rate)
+                    for video in video_frames:
+                        video_seen += 1
+                        for frame in decoder.decode_raw(video):
+                            if not decoded_any:
+                                decoded_any = got_video = True
+                                delay = 3.0
+                                print(f"[dvrip] ch{self.cfg.channel + 1} {stream}: video OK ({decoder.codec}, "
+                                      f"{frame.width}x{frame.height})", file=sys.stderr)
                             self._emit_status(CameraStatus.ACTIVE)
-                            self.frame_ready.emit(self.cfg.id, frame)
+                            # The GUI is still busy with the previous frame (or the tile is
+                            # hidden): drop this one *before* the expensive scaling/conversion.
+                            if self.pending or not self.render:
+                                continue
+                            arr = dvrip.H264Decoder.to_rgb(frame, self.max_width)
+                            h, w, _ = arr.shape
+                            img = QImage(arr.data, w, h, 3 * w, QImage.Format.Format_RGB888).copy()
+                            self.pending = True
+                            self.frame_ready.emit(self.cfg.id, img)
+                    if not decoded_any and video_seen == 100:
+                        print(f"[dvrip] {video_seen} video frames but none decoded (codec={decoder.codec})",
+                              file=sys.stderr)
+                        self._emit_status(CameraStatus.DEAD)
+                        break
             except (OSError, dvrip.DVRIPError) as exc:
-                print(f"[dvrip] stream ended: {exc}", file=sys.stderr)
+                print(f"[dvrip] ch{self.cfg.channel + 1} {stream}: stream ended: {exc}", file=sys.stderr)
                 self._emit_status(CameraStatus.DEAD)
             finally:
                 client.close()
-            time.sleep(retry_delay)
+
+            if self._restart:
+                continue                      # quality switch requested -> reconnect right away
+            if stream != "Main" and not got_video:
+                print(f"[dvrip] ch{self.cfg.channel + 1}: no sub-stream video, falling back to Main",
+                      file=sys.stderr)
+                self._no_sub = True
+                NO_SUB.add(key)
+                continue
+            delay = 3.0 if got_video else min(delay * 2, 30.0)
+            wait(delay)
 
     def run(self):
         if self.cfg.protocol == "dvrip":
@@ -227,7 +303,9 @@ class CameraWorker(QThread):
 
                 consecutive_failures = 0
                 self._emit_status(CameraStatus.ACTIVE)
-                self.frame_ready.emit(self.cfg.id, frame)
+                if not self.pending and self.render:
+                    self.pending = True
+                    self.frame_ready.emit(self.cfg.id, frame)
 
             cap.release()
             time.sleep(retry_delay)
