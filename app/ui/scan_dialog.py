@@ -135,10 +135,16 @@ class ScanDialog(QDialog):
         hit = self._selected_hit()
         if not hit:
             return
+        if 554 not in hit.open_ports:
+            QMessageBox.information(
+                self, "אין פורט RTSP",
+                "במכשיר הזה פורט RTSP (554) לא פתוח, ולכן אי אפשר להוסיף אותו כמצלמה בודדת. "
+                "אם זה NVR, לחץ 'הוסף כ-NVR'.")
+            return
         self.selected_cfg = CameraConfig(
             name=f"מצלמה {hit.host}",
             host=hit.host,
-            port=554 if 554 in hit.open_ports else list(hit.open_ports.keys())[0],
+            port=554,
             username=self.user_edit.text(),
             password=self.pass_edit.text(),
         )
@@ -150,12 +156,16 @@ class ScanDialog(QDialog):
         if not hit:
             return
         onvif_port = 80 if 80 in hit.open_ports else (8000 if 8000 in hit.open_ports else 2020)
+        extra = {}
+        if 34567 in hit.open_ports and not hit.onvif_ok:     # XM / Provision recorder: not ONVIF
+            extra = {"protocol": "dvrip", "port": 34567}
         self.selected_cfg = CameraConfig(
             name=f"NVR {hit.host}",
             host=hit.host,
             onvif_port=onvif_port,
             username=self.user_edit.text(),
             password=self.pass_edit.text(),
+            **extra,
         )
         self.selected_kind = "nvr"
         self.accept()

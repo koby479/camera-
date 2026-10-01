@@ -214,7 +214,7 @@ def enumerate_nvr_channels(nvr_cfg: CameraConfig) -> list[CameraConfig]:
             )
 
     result = []
-    for name, h, port, path in endpoints:
+    for index, (name, h, port, path) in enumerate(endpoints):
         result.append(
             CameraConfig(
                 name=f"{nvr_cfg.name} / {name}",
@@ -223,6 +223,7 @@ def enumerate_nvr_channels(nvr_cfg: CameraConfig) -> list[CameraConfig]:
                 username=nvr_cfg.username,
                 password=nvr_cfg.password,
                 rtsp_path=path,
+                channel=index,
                 parent_nvr_id=nvr_cfg.id,
             )
         )

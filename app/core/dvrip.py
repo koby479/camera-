@@ -20,6 +20,7 @@ from datetime import datetime, timedelta
 
 import hashlib
 import json
+import select
 import socket
 import string
 import struct
@@ -189,16 +190,33 @@ class DVRIPClient:
         raise DVRIPError(f"ההתחברות נדחתה, קוד {ret}: {info}", ret)
 
     def keepalive_if_due(self):
-        if self.sock and time.monotonic() - self._last_keepalive >= max(5, self.alive_interval / 2):
-            self._last_keepalive = time.monotonic()
-            self._send(self.sock, MSG_KEEPALIVE, {"Name": "KeepAlive", "SessionID": self._sid()})
-            self.sock.settimeout(3)
+        """Send a keepalive WITHOUT waiting for its reply: this is called from the video loop, so
+        any wait here is a visible freeze. When video flows on this same socket, the reply simply
+        arrives in-band and read_video_payloads() ignores it (it is not a media packet). When video
+        has its own socket, the reply is picked up from the control socket without blocking."""
+        now = time.monotonic()
+        if not self.sock or now - self._last_keepalive < max(5, self.alive_interval / 2):
+            return
+        self._last_keepalive = now
+        self._send(self.sock, MSG_KEEPALIVE, {"Name": "KeepAlive", "SessionID": self._sid()})
+        if self.media_sock is not None and self.media_sock is not self.sock:
+            self._drain_control()
+
+    def _drain_control(self):
+        """Throw away whatever the device already sent on the control socket (keepalive replies)
+        so its buffer never fills up. Never waits for data that has not arrived yet."""
+        sock = self.sock
+        try:
+            while select.select([sock], [], [], 0)[0]:
+                sock.settimeout(0.5)               # a reply that has started is tiny: it completes at once
+                self._recv_packet(sock)
+        except (OSError, DVRIPError):
+            pass
+        finally:
             try:
-                self._recv_packet(self.sock)
-            except (OSError, DVRIPError):
+                sock.settimeout(self.timeout)
+            except OSError:
                 pass
-            finally:
-                self.sock.settimeout(self.timeout)
 
     def _monitor_params(self, channel: int, stream: str) -> dict:
         return {"Channel": channel, "CombinMode": "NONE", "StreamType": stream, "TransMode": "TCP"}

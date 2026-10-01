@@ -8,13 +8,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 os.chdir(HERE)
 sys.path.insert(0, HERE)
 
-log_dir = os.path.join(os.environ.get("LOCALAPPDATA", HERE), "UniversalCamViewer")
-try:
-    os.makedirs(log_dir, exist_ok=True)
-    log = open(os.path.join(log_dir, "app.log"), "w", encoding="utf-8", buffering=1)
-    sys.stdout = sys.stderr = log          # pythonw has no console: keep prints instead of losing them
-except OSError:
-    pass
+from app.core import applog
+
+applog.setup()                             # pythonw has no console: keep prints instead of losing them
 
 try:
     from app.main import main

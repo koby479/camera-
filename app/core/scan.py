@@ -19,7 +19,11 @@ COMMON_PORTS = {
     2020: "ONVIF (alt)",
     8080: "HTTP (alt)",
     8899: "Proprietary CMS (common on cheap Chinese cameras)",
+    34567: "XM / Provision (DVRIP)",
+    37777: "Dahua (SDK port)",
 }
+
+MAX_TARGETS = 4096   # a /20 at most: a bigger range would take hours and is almost always a typo
 
 
 @dataclass
@@ -31,10 +35,24 @@ class ScanHit:
     manufacturer: str | None = None
 
 
+def _check_size(count: int):
+    if count > MAX_TARGETS:
+        raise ValueError(f"הטווח גדול מדי ({count} כתובות). המקסימום הוא {MAX_TARGETS}, "
+                         f"למשל 192.168.1.0/24 או 192.168.1.1-254")
+
+
 def _parse_targets(spec: str) -> list[str]:
+    try:
+        return _parse_targets_unchecked(spec)
+    except ValueError as exc:
+        raise ValueError(f"יעד סריקה לא תקין ({spec!r}): {exc}") from exc
+
+
+def _parse_targets_unchecked(spec: str) -> list[str]:
     spec = spec.strip()
     if "/" in spec:
         net = ipaddress.ip_network(spec, strict=False)
+        _check_size(net.num_addresses)               # before expanding: a /8 would be 16 million entries
         return [str(ip) for ip in net.hosts()]
     if "-" in spec:
         start_s, end_s = spec.split("-", 1)
@@ -45,6 +63,7 @@ def _parse_targets(spec: str) -> list[str]:
             end = ipaddress.IPv4Address(".".join(start_s.strip().split(".")[:3] + [end_s]))
         else:
             end = ipaddress.IPv4Address(end_s)
+        _check_size(int(end) - int(start) + 1)
         return [str(ipaddress.IPv4Address(i)) for i in range(int(start), int(end) + 1)]
     # single IP
     return [spec]

@@ -4,3 +4,9 @@ __pycache__/
 build/
 dist/
 *.spec
+*.part
+*.part.json
+*.mp4
+*.h264
+*.h265
+ffmpeg.exe

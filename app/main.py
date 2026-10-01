@@ -36,6 +36,7 @@ class MainWindow(QMainWindow):
         self.audio_player = AudioPlayer()
         self.audio_camera_id: str | None = None   # only one camera is audible at a time
         self.playback_dialogs: list[PlaybackDialog] = []
+        self._stopping: list[CameraWorker] = []            # stopped workers whose thread is still winding down
         self._was_maximized = False
         self._grid_full = False                            # whole window full screen, all cameras visible
         self._session_hidden: set[str] = set()             # removed from view this session only; never saved
@@ -239,6 +240,9 @@ class MainWindow(QMainWindow):
         worker = self.workers.pop(camera_id, None)
         if worker:
             worker.stop()
+            self._stopping = [w for w in self._stopping if w.isRunning()]
+            if worker.isRunning():             # keep a reference: dropping a running QThread crashes the program
+                self._stopping.append(worker)
         self.grid.remove_tile(camera_id)
 
     def on_edit_device(self, cfg: CameraConfig, kind: str):
@@ -377,6 +381,8 @@ class MainWindow(QMainWindow):
         self._connect_all_pending.clear()
         self._connect_timer.stop()
         self._leave_fullscreen()
+        for w in self.workers.values():        # signal everyone first, then wait: the waits overlap
+            w.request_stop()
         for cid in list(self.workers):
             self.remove_camera_tile(cid)
 
@@ -461,14 +467,23 @@ class MainWindow(QMainWindow):
                 break
 
     def closeEvent(self, event):
-        for worker in self.workers.values():
-            worker.stop()
+        workers = list(self.workers.values()) + self._stopping
+        for worker in workers:                 # signal everyone first, then wait: closing 16 cameras was 16 x 2 s
+            worker.request_stop()
+        for worker in workers:
+            worker.wait(2000)
         self.audio_player.stop()
         save_all(self.nvrs, self.singles)
         super().closeEvent(event)
 
 
 def main():
+    if sys.stderr is None:                 # windowed EXE: no console, so write the log file ourselves
+        from app.core import applog
+        applog.setup()
+    from app import __version__
+    print(f"[app] Universal Cam Viewer {__version__} started (python {sys.version.split()[0]}, "
+          f"frozen={getattr(sys, 'frozen', False)})", file=sys.stderr)
     app = QApplication(sys.argv)
     from app.ui.theme import DARK_THEME
     app.setStyleSheet(DARK_THEME)
