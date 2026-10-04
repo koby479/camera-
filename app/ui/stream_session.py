@@ -14,7 +14,7 @@ from app.core.streamsource import RawStreamSource
 
 
 class StreamSession(QThread):
-    progress = pyqtSignal(int, int)       # bytes received, expected bytes (0 = unknown)
+    progress = pyqtSignal(object, object)   # bytes received, expected bytes (0 = unknown); object: files can pass 2 GB
     note = pyqtSignal(str)                # e.g. waiting for the NVR to come back
     ended = pyqtSignal(bool, str)         # (the whole recording is here, message)
 

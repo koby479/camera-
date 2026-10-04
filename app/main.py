@@ -548,10 +548,19 @@ class MainWindow(QMainWindow):
         super().closeEvent(event)
 
 
+def _log_uncaught(exc_type, exc, tb):
+    """An error inside one window must not take the whole program down: Qt aborts on an unhandled exception
+    in a slot unless a custom hook is installed. Write it to app.log and carry on."""
+    import traceback
+    print("[error] uncaught exception:", file=sys.stderr)
+    traceback.print_exception(exc_type, exc, tb, file=sys.stderr)
+
+
 def main():
     if sys.stderr is None:                 # windowed EXE: no console, so write the log file ourselves
         from app.core import applog
         applog.setup()
+    sys.excepthook = _log_uncaught
     from app import __version__
     print(f"[app] Universal Cam Viewer {__version__} started (python {sys.version.split()[0]}, "
           f"frozen={getattr(sys, 'frozen', False)})", file=sys.stderr)

@@ -414,7 +414,9 @@ class PlayerWindow(QWidget):
     def _show_time(self, t: float):
         self.time_label.setText(f"{fmt_clock(t)} / {fmt_clock(self.duration)}")
         if self.start_time is not None:
-            self.wall_label.setText((self.start_time + timedelta(seconds=t)).strftime("🕒 %Y-%m-%d  %H:%M:%S"))
+            # strftime must get a plain ASCII format: on Windows an emoji in it raises UnicodeEncodeError
+            stamp = (self.start_time + timedelta(seconds=t)).strftime("%Y-%m-%d  %H:%M:%S")
+            self.wall_label.setText("🕒 " + stamp)
 
     def _on_zoom(self, zoom: float):
         self.zoom_label.setText(f"🔍 x{zoom:.1f}" if zoom > 1.0001 else "")

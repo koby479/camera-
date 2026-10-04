@@ -129,7 +129,7 @@ class _PlayWorker(QThread):
 
 
 class _DownloadWorker(QThread):
-    progress = pyqtSignal(int, int)     # bytes received, expected bytes (0 = unknown)
+    progress = pyqtSignal(object, object)   # bytes received, expected bytes (0 = unknown); object: files can pass 2 GB
     stage = pyqtSignal(str)
     note = pyqtSignal(str)              # status text only (e.g. waiting for the NVR to come back)
     finished_ok = pyqtSignal(str, str)  # final path, note ("" when everything went as planned)
