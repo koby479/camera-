@@ -9,7 +9,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QKeyEvent, QKeySequence, QShortcut
 
-from app.core.camera import CameraConfig, CameraWorker, CameraStatus
+from app.core.camera import CameraConfig, CameraWorker, CameraStatus, NO_SUB
 from app.core.store import load_all, save_all, DEFAULT_MAX_TILES
 from app.ui.sidebar import Sidebar
 from app.ui.video_grid import VideoGrid
@@ -217,8 +217,12 @@ class MainWindow(QMainWindow):
         tile.hide_requested.connect(self._hide_tile)
         tile.hide_dead_requested.connect(self._hide_dead_tiles)
         tile.grid_fullscreen_requested.connect(self._toggle_grid_fullscreen)
+        tile.reconnect_requested.connect(self._reconnect_tile)
+        tile.edit_connection_requested.connect(self._on_tile_edit_connection)
         self.grid.add_tile(tile)
+        self._start_worker(cfg, tile, main)
 
+    def _start_worker(self, cfg: CameraConfig, tile: VideoTile, main: bool = False):
         worker = CameraWorker(cfg)
         worker.frame_ready.connect(self._on_frame)
         worker.status_changed.connect(self._on_status)
@@ -271,10 +275,77 @@ class MainWindow(QMainWindow):
         # if this camera is currently live in the grid, restart its worker
         # with the new connection details instead of requiring a full app restart
         if new_cfg.id in self.workers:
-            self.remove_camera_tile(new_cfg.id)
-            self.on_toggle_camera(new_cfg)
+            self._reconnect_tile(new_cfg.id, cfg=new_cfg)       # same place in the grid, new details
+        if kind == "nvr":
+            self._propagate_nvr_connection(new_cfg)
 
         save_all(self.nvrs, self.singles)
+
+    # ---- reconnect / change connection (right-click menu of a tile) ------------
+    @staticmethod
+    def _detach_worker(worker: CameraWorker):
+        """Stop listening to a worker that is being replaced, so its last messages cannot overwrite the new one's."""
+        for sig in (worker.frame_ready, worker.status_changed, worker.path_resolved, worker.audio_ready):
+            try:
+                sig.disconnect()
+            except (TypeError, RuntimeError):
+                pass
+
+    def _reconnect_tile(self, camera_id: str, main: bool | None = None, cfg: CameraConfig | None = None):
+        """Drop the connection of one tile and make a new one: same tile, same place in the grid.
+        main: None = keep the current stream, True / False = switch to the main / sub stream.
+        cfg: new connection details (after the edit dialog)."""
+        tile = self.grid.tiles.get(camera_id)
+        if tile is None:
+            return
+        if cfg is not None:
+            tile.cfg = cfg
+            tile.set_title(cfg.name)
+        cfg = tile.cfg
+        old = self.workers.pop(camera_id, None)
+        was_main = bool(old.force_main) if old is not None else False
+        if old is not None:
+            self._detach_worker(old)
+            old.request_stop()                     # do not wait: the window stays responsive
+            self._stopping = [w for w in self._stopping if w.isRunning()]
+            self._stopping.append(old)             # kept alive until its thread has really ended
+        if self.audio_camera_id == camera_id:
+            self.audio_camera_id = None
+            self.audio_player.stop()
+            tile.set_audio_on(False)
+        use_main = was_main if main is None else main
+        NO_SUB.discard((cfg.host, cfg.port, cfg.channel))   # forget "this camera has no sub-stream": try again
+        tile.begin_reconnect(use_main)
+        self._start_worker(cfg, tile, use_main)
+
+    def _on_tile_edit_connection(self, cfg: CameraConfig):
+        if cfg.parent_nvr_id:                      # a channel: the connection details belong to its NVR
+            owner = next((n for n in self.nvrs if n.id == cfg.parent_nvr_id), None)
+            kind = "nvr"
+        else:
+            owner = next((s for s in self.singles if s.id == cfg.id), None)
+            kind = "single"
+        if owner is None:
+            QMessageBox.information(self, "שינוי חיבור", "המכשיר של המצלמה הזאת לא נמצא ברשימה.")
+            return
+        self._leave_fullscreen()
+        self.on_edit_device(owner, kind)
+
+    def _propagate_nvr_connection(self, nvr: CameraConfig):
+        """After the NVR's details were edited: its channels (already listed in the sidebar) must use them
+        too, and the ones open in the grid reconnect with the new details."""
+        item = self.nvr_items.get(nvr.id)
+        if item is None:
+            return
+        for i in range(item.childCount()):
+            ch = item.child(i).data(0, Qt.ItemDataRole.UserRole + 1)
+            if not isinstance(ch, CameraConfig):
+                continue
+            ch.username, ch.password = nvr.username, nvr.password
+            if nvr.protocol == "dvrip":            # ONVIF channels keep the addresses the NVR itself reported
+                ch.host, ch.port = nvr.host, nvr.port
+            if ch.id in self.workers:
+                self._reconnect_tile(ch.id)
 
     def on_remove_device(self, cfg: CameraConfig, kind: str):
         self.remove_camera_tile(cfg.id)

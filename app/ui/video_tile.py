@@ -21,12 +21,21 @@ STATUS_LABELS = {
 }
 
 
+STATUS_HINTS = {
+    CameraStatus.OFFLINE: "אין מענה מהכתובת. בדוק כתובת, פורט, אינטרנט ופורט-פורוורד",
+    CameraStatus.DEAD: "החיבור נפתח אבל לא מגיעה תמונה. נסה זרם אחר או התחבר מחדש",
+    CameraStatus.AUTH_FAILED: "שם המשתמש או הסיסמה שגויים. תקן ב'שנה פרטי חיבור'",
+}
+
+
 class VideoTile(QWidget):
     audio_toggled = pyqtSignal(str, bool)      # camera_id, wants_audio
     activated = pyqtSignal(str)                # double-click: enlarge / restore
     hd_toggled = pyqtSignal(str, bool)         # camera_id, wants main stream
     playback_requested = pyqtSignal(object)    # CameraConfig (right-click menu)
     close_requested = pyqtSignal(str)          # camera_id
+    reconnect_requested = pyqtSignal(str, object)       # camera_id, None = same stream / True = main / False = sub
+    edit_connection_requested = pyqtSignal(object)      # CameraConfig: open the edit dialog of the owning device
     hide_requested = pyqtSignal(str)           # camera_id: remove a broken camera for this session
     close_all_requested = pyqtSignal()
     hide_dead_requested = pyqtSignal()        # remove every camera that is not working (this session only)
@@ -120,7 +129,18 @@ class VideoTile(QWidget):
         self.status_label.setText(f"● {text}")
         self.status_label.setStyleSheet(f"color:{color}; font-weight:bold; padding:2px;")
         if status in (CameraStatus.OFFLINE, CameraStatus.DEAD, CameraStatus.AUTH_FAILED):
-            self.video_label.setText(text)
+            self.video_label.setText(f"{text}\n\nקליק ימני ← התחבר מחדש")
+
+    def begin_reconnect(self, main: bool = False):
+        """Shown while a fresh connection is being made: clear the old picture and the error."""
+        self._last_img = None
+        self.video_label.setPixmap(QPixmap())
+        self.set_status(CameraStatus.UNKNOWN)
+        self.video_label.setText("מתחבר מחדש...")
+        if self.cfg.protocol == "dvrip":
+            self.hd_btn.blockSignals(True)
+            self.hd_btn.setChecked(main)
+            self.hd_btn.blockSignals(False)
 
     def mouseDoubleClickEvent(self, event):
         self.activated.emit(self.cfg.id)
@@ -241,6 +261,21 @@ class VideoTile(QWidget):
     # ---- right-click menu -----------------------------------------------
     def contextMenuEvent(self, event):
         menu = QMenu(self)
+        broken = self.status in (CameraStatus.OFFLINE, CameraStatus.DEAD, CameraStatus.AUTH_FAILED)
+        a_reconnect = menu.addAction("🔄 התחבר מחדש" + ("   ← המצלמה לא מחוברת" if broken else ""))
+        if broken:
+            f = a_reconnect.font()
+            f.setBold(True)
+            a_reconnect.setFont(f)
+        a_swap = None
+        if self.cfg.protocol == "dvrip":
+            a_swap = menu.addAction("🔀 התחבר מחדש בזרם משני (קל)" if self.hd_btn.isChecked()
+                                    else "🔀 התחבר מחדש בזרם ראשי (HD)")
+        a_edit = menu.addAction("✏ שנה פרטי חיבור (כתובת / סיסמה)…")
+        if broken:
+            why = menu.addAction("ℹ " + STATUS_HINTS[self.status])
+            why.setEnabled(False)
+        menu.addSeparator()
         a_play = menu.addAction("📼 צפייה בהקלטות (לאחור)")
         zoom_menu = menu.addMenu("🔍 זום דיגיטלי  (גם בגלגלת העכבר)")
         zoom_actions = {zoom_menu.addAction(f"x{f}"): f for f in (2, 4, 8)}
@@ -262,7 +297,6 @@ class VideoTile(QWidget):
         menu.addSeparator()
         a_close = menu.addAction("✖ סגור מצלמה")
         a_close_all = menu.addAction("✖ סגור את כל המצלמות")
-        broken = self.status in (CameraStatus.OFFLINE, CameraStatus.DEAD, CameraStatus.AUTH_FAILED)
         a_hide = a_hide_dead = None
         menu.addSeparator()
         if broken:
@@ -272,7 +306,13 @@ class VideoTile(QWidget):
         chosen = menu.exec(event.globalPos())
         if chosen is None:
             return
-        if chosen is a_play:
+        if chosen is a_reconnect:
+            self.reconnect_requested.emit(self.cfg.id, None)
+        elif a_swap is not None and chosen is a_swap:
+            self.reconnect_requested.emit(self.cfg.id, not self.hd_btn.isChecked())
+        elif chosen is a_edit:
+            self.edit_connection_requested.emit(self.cfg)
+        elif chosen is a_play:
             self.playback_requested.emit(self.cfg)
         elif chosen in zoom_actions:
             self._set_zoom(zoom_actions[chosen])

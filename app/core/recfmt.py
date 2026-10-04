@@ -1,6 +1,7 @@
 """Formatting helpers for the recordings list (no Qt, unit-tested)."""
 from __future__ import annotations
 
+import re
 from datetime import datetime
 
 _FMT = "%Y-%m-%d %H:%M:%S"
@@ -47,3 +48,17 @@ def group_by_day(files) -> list[tuple[str, list[dict]]]:
 def safe_filename(channel: int, item: dict, ext: str = "h264") -> str:
     stamp = item["begin"].replace(":", "-").replace(" ", "_")
     return f"channel{channel + 1}_{stamp}.{ext}"
+
+
+_STAMP = re.compile(r"(\d{4})-(\d{2})-(\d{2})_(\d{2})-(\d{2})-(\d{2})")
+
+
+def parse_stamp(filename: str) -> datetime | None:
+    """Start time of a recording from a name made by safe_filename ('channel3_2026-10-01_14-03-22.mp4')."""
+    m = _STAMP.search(filename)
+    if not m:
+        return None
+    try:
+        return datetime(*map(int, m.groups()))
+    except ValueError:
+        return None
