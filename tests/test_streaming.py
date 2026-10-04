@@ -314,3 +314,66 @@ class EngineWithDownloadTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EndToEndTests(unittest.TestCase):
+    """The whole path behind '▶ נגן במלא' with a fake NVR: prepare -> download session -> player source."""
+
+    def test_session_downloads_and_the_source_plays_it(self):
+        from app.core.config import CameraConfig
+        from app.ui import stream_session
+        from tests.test_xm_embedded import fc, fd, nal
+
+        frames = [nal(200 + i, i % 250 + 1) for i in range(60)]
+        wire = fc(frames[0]) + b"".join(fd(f) for f in frames[1:])
+
+        class FakeClient:
+            def __init__(self, *a, **k):
+                pass
+
+            def connect(self):
+                pass
+
+            def login(self):
+                pass
+
+            def start_download(self, channel, item, stream_type=0):
+                pass
+
+            def read_download_payloads(self):
+                for i in range(0, len(wire), 50):
+                    yield wire[i:i + 50]
+
+            def keepalive_if_due(self):
+                pass
+
+            def close(self):
+                pass
+
+        tmp = Path(tempfile.mkdtemp())
+        old_client, old_cache, old_dec = dvrip.DVRIPClient, streamcache.CACHE_DIR, dvrip.H264Decoder
+        dvrip.DVRIPClient, streamcache.CACHE_DIR, dvrip.H264Decoder = FakeClient, tmp, FakeDecoder
+        try:
+            cfg = CameraConfig(name="nvr", host="1.2.3.4", port=34567, protocol="dvrip")
+            rec = {"name": "f", "begin": "2026-10-01 08:00:00", "end": "2026-10-01 08:00:06", "size": len(wire)}
+            pb = stream_session.prepare_stream(cfg, 0, rec, 0)
+            self.assertIsNotNone(pb.session)
+            self.assertAlmostEqual(pb.state.declared, 6.0)
+            self.assertEqual(pb.title.split("·")[1].strip(), "ערוץ 1")
+            pb.session.run()                                         # synchronously, in this thread
+            self.assertTrue(pb.state.complete, pb.state.failed)
+            self.assertAlmostEqual(pb.state.fps, 10.0)               # 60 frames in the 6 s the NVR announced
+            meta = streamcache.load_meta(pb.paths)
+            self.assertTrue(meta["complete"] and meta["frames"] == 60)
+            src = pb.factory(None)
+            times = [round(t, 3) for t, _f in src.frames_from(0)]
+            self.assertEqual(times, [round(i / 10, 3) for i in range(60)])      # one per frame, 10 per second
+            self.assertEqual([round(t, 3) for t, _f in itertools.islice(src.frames_from(2.5), 2)], [2.5, 2.6])
+            self.assertAlmostEqual(src.duration, 6.0)
+            # the next time the same recording is opened nothing is downloaded
+            again = stream_session.prepare_stream(cfg, 0, rec, 0)
+            self.assertIsNone(again.session)
+            self.assertTrue(again.state.complete)
+        finally:
+            dvrip.DVRIPClient, streamcache.CACHE_DIR, dvrip.H264Decoder = old_client, old_cache, old_dec
+            shutil.rmtree(tmp, ignore_errors=True)

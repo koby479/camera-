@@ -306,10 +306,10 @@ class PlaybackDialog(QDialog):
         self.dl_btn = QPushButton("⬇ הורד קובץ")
         self.dl_btn.setToolTip("שומר את ההקלטה שנבחרה כקובץ MP4 בתיקייה Videos\\CameraRecordings")
         self.dl_btn.clicked.connect(self._download_selected)
-        self.full_btn = QPushButton("▶ נגן במלא  (קדימה / אחורה / מהירויות)")
-        self.full_btn.setToolTip("פותח נגן מלא ומתחיל לנגן מיד. ההקלטה יורדת ברקע, אפשר לקפוץ אחורה, לנגן לאחור, "
+        self.play_full_btn = QPushButton("▶ נגן במלא  (קדימה / אחורה / מהירויות)")
+        self.play_full_btn.setToolTip("פותח נגן מלא ומתחיל לנגן מיד. ההקלטה יורדת ברקע, אפשר לקפוץ אחורה, לנגן לאחור, "
                                  "להאיץ ולהאט. קדימה אפשר עד המקום שכבר ירד. בסוף אפשר לשמור כ-MP4")
-        self.full_btn.clicked.connect(self._play_full)
+        self.play_full_btn.clicked.connect(self._play_full)
         self.open_btn = QPushButton("📂 פתח קובץ בנגן")
         self.open_btn.setToolTip("פותח בנגן המלא קובץ וידאו שהורדת קודם")
         self.open_btn.clicked.connect(self._open_local)
@@ -338,7 +338,7 @@ class PlaybackDialog(QDialog):
         controls.addWidget(self.status, 1)
 
         controls2 = QHBoxLayout()
-        controls2.addWidget(self.full_btn)
+        controls2.addWidget(self.play_full_btn)
         controls2.addWidget(self.open_btn)
         controls2.addStretch(1)
 
