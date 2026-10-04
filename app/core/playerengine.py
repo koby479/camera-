@@ -13,7 +13,7 @@ from PyQt6.QtCore import QThread, pyqtSignal
 from PyQt6.QtGui import QImage
 
 from app.core.playclock import FrameHistory, PlaybackClock, clamp
-from app.core.videosource import VideoSource
+from app.core.videosource import WAITING, VideoSource
 
 REVERSE_CHUNK = 1.0     # seconds of video decoded at a time when playing backwards
 LATE = 0.12             # a frame later than this is skipped instead of shown, so the speed stays right
@@ -25,6 +25,9 @@ class PlayerEngine(QThread):
     opened = pyqtSignal(float, float, int, int)      # duration, fps, width, height
     paused_changed = pyqtSignal(bool)
     error = pyqtSignal(str)
+    buffering_changed = pyqtSignal(bool)             # waiting for data that is still being downloaded
+    progress = pyqtSignal(float, bool)               # seconds that can be played now, whole recording here
+    duration_changed = pyqtSignal(float)
 
     def __init__(self, path: str, source_factory=VideoSource, max_width: int = 1280):
         super().__init__()
@@ -53,6 +56,8 @@ class PlayerEngine(QThread):
         self.history = FrameHistory(60)
         self._clock = PlaybackClock()
         self._last_shown = 0.0
+        self._buffering = False
+        self._last_report = 0.0
 
     # ---- commands (called from the window) -------------------------------
     def _post(self, **kw):
@@ -125,6 +130,7 @@ class PlayerEngine(QThread):
 
     def _loop(self):
         while self._running:
+            self._report()
             if self._dirty and self._apply_commands():
                 continue
             if self._paused:
@@ -138,6 +144,11 @@ class PlayerEngine(QThread):
     # ---- forward ------------------------------------------------------------
     def _forward_tick(self):
         item = self._pull()
+        if item is WAITING:                          # the download has not got there yet
+            self._set_buffering(True)
+            time.sleep(0.05)
+            return
+        self._set_buffering(False)
         if item is None:
             self._reached_end()
             return
@@ -175,10 +186,44 @@ class PlayerEngine(QThread):
             self._it = None
             return None
 
+    def _pull_blocking(self):
+        """Like _pull, but waits for data that is still being downloaded (until a command arrives)."""
+        while True:
+            item = self._pull()
+            if item is not WAITING:
+                self._set_buffering(False)
+                return item
+            self._set_buffering(True)
+            if not self._running or self._dirty:
+                return WAITING
+            time.sleep(0.05)
+
+    def _set_buffering(self, on: bool):
+        if on != self._buffering:
+            self._buffering = on
+            self.buffering_changed.emit(on)
+
+    def _report(self):
+        """About twice a second: tell the window how far the download is and whether the length changed."""
+        now = time.monotonic()
+        if now - self._last_report < 0.5:
+            return
+        self._last_report = now
+        d = float(getattr(self.source, "duration", self.duration) or 0.0)
+        self.fps = float(getattr(self.source, "fps", self.fps) or self.fps)
+        if abs(d - self.duration) > 0.05:
+            self.duration = d
+            self.duration_changed.emit(d)
+        buffered = getattr(self.source, "buffered_until", None)
+        if buffered is not None:
+            self.progress.emit(float(buffered), bool(getattr(self.source, "complete", True)))
+
     def _resync_forward(self):
         """Continue forward from the frame on screen (after backwards play or a step)."""
         self._start_forward(self._pos)
         first = self._pull()
+        if first is WAITING:
+            first = None
         if first is not None and first[0] > self._pos + 0.5 / self.fps:
             self._carry = first                      # the on-screen frame was skipped by the seek; this is the next one
 
@@ -191,7 +236,10 @@ class PlayerEngine(QThread):
                 return
             start = max(0.0, end - REVERSE_CHUNK)
             frames = []
-            for t, payload in self.source.frames_from(start):
+            for item in self.source.frames_from(start):
+                if item is WAITING:
+                    break
+                t, payload = item
                 if t >= end - 0.25 / self.fps:
                     break
                 frames.append((t, self._to_image(payload)))
@@ -222,17 +270,18 @@ class PlayerEngine(QThread):
     # ---- jumping and stepping -----------------------------------------------
     def _goto(self, t: float):
         hi = self.duration - 1.0 / self.fps if self.duration > 0 else 1e9
+        hi = min(hi, float(getattr(self.source, "buffered_until", hi)))     # a download in progress: only what is here
         t = clamp(t, 0.0, max(0.0, hi))
         self.history.clear()
         self._rev = []
         self._eof = False
         self._start_forward(t)
-        item = self._pull()
+        item = self._pull_blocking()
         if item is None:                             # past the last frame: show the last one instead
             self._start_forward(max(0.0, self.duration - 2.0 / self.fps))
-            item = self._pull()
-        if item is None:
-            self._eof = True
+            item = self._pull_blocking()
+        if item is None or item is WAITING:
+            self._eof = item is None
             return
         self._display(item, force=True, push=True)
         self._clock_restart()
@@ -251,6 +300,8 @@ class PlayerEngine(QThread):
             self._rev = []
             self._resync_forward()
         item = self._pull()
+        if item is WAITING:
+            return
         if item is None:
             self._eof = True
             return

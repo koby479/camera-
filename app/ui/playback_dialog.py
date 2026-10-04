@@ -17,7 +17,7 @@ from PyQt6.QtWidgets import (
 from app.core import dvrip, recsearch, recfmt, mp4, resumable
 from app.core.audio import AudioPlayer
 from app.core.camera import CameraConfig
-from app.ui.player_window import open_player
+from app.ui.player_window import open_player, open_stream_player
 
 
 def _explain(step: str, exc: Exception) -> str:
@@ -305,12 +305,11 @@ class PlaybackDialog(QDialog):
                                       "לא כל NVR מקליט אותו - אם לא מגיעה תמונה, חזור לאיכות מלאה")
         self.dl_btn = QPushButton("⬇ הורד קובץ")
         self.dl_btn.setToolTip("שומר את ההקלטה שנבחרה כקובץ MP4 בתיקייה Videos\\CameraRecordings")
-        self.dl_btn.clicked.connect(self._download_clicked)
-        self._play_after = False                   # the download was started with "download and play"
-        self.play_dl_btn = QPushButton("🎞 הורד ונגן  (קדימה / אחורה / מהירויות)")
-        self.play_dl_btn.setToolTip("מוריד את ההקלטה ופותח אותה בנגן מלא: הרצה לאחור, קפיצה, פריים-פריים, מהירויות, "
-                                    "לולאה וזום. הקובץ נשמר, ובפעם הבאה הוא נפתח מיד בלי להוריד שוב")
-        self.play_dl_btn.clicked.connect(self._download_and_play)
+        self.dl_btn.clicked.connect(self._download_selected)
+        self.full_btn = QPushButton("▶ נגן במלא  (קדימה / אחורה / מהירויות)")
+        self.full_btn.setToolTip("פותח נגן מלא ומתחיל לנגן מיד. ההקלטה יורדת ברקע, אפשר לקפוץ אחורה, לנגן לאחור, "
+                                 "להאיץ ולהאט. קדימה אפשר עד המקום שכבר ירד. בסוף אפשר לשמור כ-MP4")
+        self.full_btn.clicked.connect(self._play_full)
         self.open_btn = QPushButton("📂 פתח קובץ בנגן")
         self.open_btn.setToolTip("פותח בנגן המלא קובץ וידאו שהורדת קודם")
         self.open_btn.clicked.connect(self._open_local)
@@ -339,7 +338,7 @@ class PlaybackDialog(QDialog):
         controls.addWidget(self.status, 1)
 
         controls2 = QHBoxLayout()
-        controls2.addWidget(self.play_dl_btn)
+        controls2.addWidget(self.full_btn)
         controls2.addWidget(self.open_btn)
         controls2.addStretch(1)
 
@@ -399,16 +398,20 @@ class PlaybackDialog(QDialog):
         self._query = q
         q.start()
 
+    @staticmethod
+    def _key(f: dict) -> tuple:
+        return (f["begin"], f["end"], f["size"])
+
     def _on_partial(self, new: list):
         for f in new:
-            self._found[(f["name"], f["begin"])] = f
+            self._found[self._key(f)] = f
         if not self._rebuild_timer.isActive():
             self._rebuild_timer.start()
 
     def _rebuild_list(self):
         cur = self.files.currentItem()
         keep = cur.data(0, Qt.ItemDataRole.UserRole) if cur is not None else None
-        keep_key = (keep["name"], keep["begin"]) if isinstance(keep, dict) else None
+        keep_key = self._key(keep) if isinstance(keep, dict) else None
         self.files.clear()
         bold = QFont()
         bold.setBold(True)
@@ -426,13 +429,13 @@ class PlaybackDialog(QDialog):
                 row.setTextAlignment(1, Qt.AlignmentFlag.AlignCenter)
                 row.setTextAlignment(2, Qt.AlignmentFlag.AlignCenter)
                 head.addChild(row)
-                if keep_key is not None and (f["name"], f["begin"]) == keep_key:
+                if keep_key is not None and self._key(f) == keep_key:
                     self.files.setCurrentItem(row)
             head.setExpanded(True)
 
     def _on_files(self, files: list, failed: list):
         for f in files:
-            self._found[(f["name"], f["begin"])] = f
+            self._found[self._key(f)] = f
         self._rebuild_timer.stop()
         self._rebuild_list()
         self._retire_query()
@@ -485,11 +488,6 @@ class PlaybackDialog(QDialog):
         except OSError:
             folder = Path.home()
         path = folder / recfmt.safe_filename(ch, rec, "mp4")
-        if self._play_after and self._download_complete(path):    # downloaded before: no need to fetch it again
-            self._play_after = False
-            self.status.setText("הקובץ כבר הורד קודם, נפתח בנגן")
-            self._open_in_player(str(path))
-            return
         if path.with_suffix(".h264.part.json").exists() and not path.exists():
             pass                                                  # an interrupted download of this recording: continue it
         else:
@@ -505,29 +503,24 @@ class PlaybackDialog(QDialog):
         w.failed.connect(self._on_dl_failed)
         self._download = w
         self.dl_btn.setText("✖ בטל הורדה")
-        self.play_dl_btn.setEnabled(False)
         self.dl_bar.setRange(0, 0)
         self.dl_bar.setVisible(True)
         self.status.setText("מוריד...")
         w.start()
 
-    def _download_clicked(self):
-        self._play_after = False
-        self._download_selected()
-
-    def _download_and_play(self):
-        self._play_after = True
-        self._download_selected()
-
-    @staticmethod
-    def _download_complete(path: Path) -> bool:
-        """True for a finished download (the log written next to it says the NVR sent everything)."""
+    def _play_full(self):
+        rec = self._selected_record()
+        if rec is None:
+            self.status.setText("בחר הקלטה מהרשימה כדי לנגן")
+            return
+        self._stop()                                  # the small preview also uses a connection to the NVR
         try:
-            if not path.exists() or path.stat().st_size == 0:
-                return False
-            return "complete: True" in Path(str(path) + ".log.txt").read_text(encoding="utf-8")
-        except OSError:
-            return False
+            open_stream_player(self.cfg, self.channel_combo.currentData(), rec, self.quality_combo.currentData())
+        except Exception as exc:                      # noqa: BLE001 - say so in the window instead of failing silently
+            print(f"[player] {exc!r}", file=sys.stderr)
+            self.status.setText(f"פתיחת הנגן נכשלה: {exc}")
+            return
+        self.status.setText("הנגן נפתח. ההקלטה יורדת ברקע ואפשר לצפות כבר עכשיו")
 
     def _open_in_player(self, path: str):
         try:
@@ -546,7 +539,6 @@ class PlaybackDialog(QDialog):
 
     def _dl_reset(self):
         self.dl_btn.setText("⬇ הורד קובץ")
-        self.play_dl_btn.setEnabled(True)
         self.dl_bar.setVisible(False)
 
     def _on_dl_stage(self, text: str):
@@ -563,12 +555,10 @@ class PlaybackDialog(QDialog):
     def _on_dl_done(self, path: str, note: str):
         self._dl_reset()
         self.status.setText(f"נשמר: {path}" + (f". {note}" if note else ""))
-        play, self._play_after = self._play_after, False
-        if play and path.lower().endswith(".mp4"):
-            self._open_in_player(path)
+        if path.lower().endswith(".mp4"):
+            self.status.setText(f"נשמר: {path}. אפשר לפתוח אותו בנגן עם 'פתח קובץ בנגן'")
 
     def _on_dl_failed(self, message: str):
-        self._play_after = False
         self._dl_reset()
         self.status.setText(message)
 

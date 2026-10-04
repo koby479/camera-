@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import numpy as np
 
+WAITING = object()      # what a source that is still being filled yields when the wanted frame is not there yet
+
 
 class VideoSource:
     def __init__(self, path: str):

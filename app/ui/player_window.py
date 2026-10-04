@@ -11,13 +11,15 @@ from pathlib import Path
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QImage, QPixmap
 from PyQt6.QtWidgets import (
-    QCheckBox, QComboBox, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QSlider, QStyle, QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QHBoxLayout, QLabel, QProgressBar, QPushButton, QSizePolicy, QSlider, QStyle,
+    QVBoxLayout, QWidget,
 )
 
-from app.core import recfmt
+from app.core import recfmt, streamcache
 from app.core.playclock import SPEEDS, fmt_clock
 from app.core.playerengine import PlayerEngine
 from app.core.zoom import ZoomState, fit_rect
+from app.ui.stream_session import Mp4Saver, StreamPlayback, prepare_stream
 
 _OPEN: list = []          # open player windows (a top-level window with no owner would be garbage collected)
 _BACKGROUND: list = []    # engines that were asked to stop but have not finished yet
@@ -158,13 +160,18 @@ class _VideoView(QLabel):
 
 
 class PlayerWindow(QWidget):
-    def __init__(self, path: str):
+    def __init__(self, path: str = "", stream: StreamPlayback | None = None):
         super().__init__()
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.path = path
-        self.start_time: datetime | None = recfmt.parse_stamp(Path(path).name)
-        self.setWindowTitle(f"נגן הקלטות - {Path(path).name}")
+        self.stream = stream                      # a recording that is still downloading (None: a file on disk)
+        self.session = stream.session if stream else None
+        self.start_time: datetime | None = stream.start_time if stream else recfmt.parse_stamp(Path(path).name)
+        self.setWindowTitle(f"נגן הקלטות - {stream.title if stream else Path(path).name}")
+        self._buffered = 0.0
+        self._whole_here = stream is None or stream.state.complete
+        self._saver = None
         self.resize(1100, 740)
         self.duration = 0.0
         self.fps = 25.0
@@ -183,9 +190,24 @@ class PlayerWindow(QWidget):
 
         self.slider = _SeekSlider()
         self.slider.setRange(0, 0)
-        self.slider.seek_requested.connect(lambda ms: self.engine.seek(ms / 1000.0))
+        self.slider.seek_requested.connect(self._on_slider_seek)
         self.slider.scrubbing.connect(lambda on: setattr(self, "_scrubbing", on))
 
+        self.buf_bar = QProgressBar()             # how much of the recording is already here (streaming only)
+        self.buf_bar.setRange(0, 1000)
+        self.buf_bar.setTextVisible(False)
+        self.buf_bar.setFixedHeight(6)
+        self.buf_bar.setVisible(stream is not None)
+        self.buffer_label = QLabel("⏳ ממתין לנתונים מה-NVR...")
+        self.buffer_label.setStyleSheet("font-size:14px; color:#f39c12; font-weight:600;")
+        self.buffer_label.setVisible(False)
+        self.dl_label = QLabel("")
+        self.dl_label.setStyleSheet("color:#9fb4ff;")
+        self.save_btn = QPushButton("💾 שמור כ-MP4")
+        self.save_btn.setToolTip("שומר את ההקלטה כקובץ MP4 בתיקיית Videos\\CameraRecordings (אחרי שירדה כולה)")
+        self.save_btn.setEnabled(False)
+        self.save_btn.setVisible(stream is not None)
+        self.save_btn.clicked.connect(self._save_mp4)
         self.time_label = QLabel("00:00 / 00:00")
         self.time_label.setStyleSheet("font-size:15px; font-weight:600;")
         self.wall_label = QLabel("")
@@ -252,14 +274,18 @@ class PlayerWindow(QWidget):
         row_options.addSpacing(10)
         row_options.addWidget(self.loop_all)
         row_options.addStretch(1)
-        for w in (self.zoom_label, self.msg_label, self.snap_btn, self.full_btn):
+        for w in (self.zoom_label, self.msg_label, self.save_btn, self.snap_btn, self.full_btn):
             row_options.addWidget(w)
 
         row_time = QHBoxLayout()
         row_time.addWidget(self.time_label)
         row_time.addSpacing(16)
         row_time.addWidget(self.wall_label)
+        row_time.addSpacing(16)
+        row_time.addWidget(self.buffer_label)
         row_time.addStretch(1)
+        row_time.addWidget(self.dl_label)
+        row_time.addSpacing(10)
         row_time.addWidget(self.info_label)
 
         help_label = QLabel(HELP)
@@ -270,6 +296,7 @@ class PlayerWindow(QWidget):
         pl = QVBoxLayout(self.panel)
         pl.setContentsMargins(6, 2, 6, 6)
         pl.addWidget(self.slider)
+        pl.addWidget(self.buf_bar)
         pl.addLayout(row_time)
         pl.addLayout(row_transport)
         pl.addLayout(row_options)
@@ -284,19 +311,88 @@ class PlayerWindow(QWidget):
         for w in self.findChildren((QPushButton, QComboBox, QCheckBox, QSlider)):
             w.setFocusPolicy(Qt.FocusPolicy.NoFocus)      # so the keyboard shortcuts reach the window
 
-        self.engine = PlayerEngine(path)
+        self.engine = PlayerEngine(path, source_factory=stream.factory) if stream else PlayerEngine(path)
         self.engine.opened.connect(self._on_opened)
         self.engine.frame.connect(self._on_frame)
         self.engine.paused_changed.connect(self._on_paused)
         self.engine.error.connect(self._on_error)
+        self.engine.progress.connect(self._on_progress)
+        self.engine.buffering_changed.connect(self.buffer_label.setVisible)
+        self.engine.duration_changed.connect(self._on_duration)
+        if self.session is not None:
+            self.session.progress.connect(self._on_session_progress)
+            self.session.note.connect(self.dl_label.setText)
+            self.session.ended.connect(self._on_session_ended)
+            self.session.start()
+        elif stream is not None:
+            self.dl_label.setText("✔ ההקלטה כולה במחשב")
+            self.save_btn.setEnabled(True)
         self.engine.start()
 
     # ---- from the engine ------------------------------------------------------
     def _on_opened(self, duration: float, fps: float, w: int, h: int):
         self.duration, self.fps = duration, fps
         self.slider.setRange(0, int(duration * 1000))
-        self.info_label.setText(f"{w}×{h}  {fps:.0f} fps")
+        self.info_label.setText(f"{w}×{h}  {fps:.0f} fps" if w else f"{fps:.0f} fps")
         self._show_time(0.0)
+
+    def _on_duration(self, duration: float):
+        self.duration = duration
+        self.slider.setRange(0, int(duration * 1000))
+        self._show_time(self._t)
+
+    def _on_progress(self, buffered: float, whole_here: bool):
+        self._buffered = buffered
+        if self.duration > 0:
+            self.buf_bar.setValue(min(1000, int(1000 * buffered / self.duration)))
+        self._whole_here = whole_here
+
+    def _on_slider_seek(self, ms: int):
+        t = ms / 1000.0
+        if self.stream is not None and not self._whole_here and t > self._buffered + 1.0:
+            self._flash(f"אפשר לקפוץ רק עד מה שכבר ירד ({fmt_clock(self._buffered)})", False)
+        self.engine.seek(t)
+
+    # ---- the download behind a streaming window -----------------------------
+    def _on_session_progress(self, done: int, total: int):
+        mb = done / (1024 * 1024)
+        if total:
+            self.dl_label.setText(f"⬇ ירד {min(100, int(100 * done / total))}%  ({mb:.0f}/{total / (1024 * 1024):.0f} MB)")
+        else:
+            self.dl_label.setText(f"⬇ ירד {mb:.0f} MB")
+
+    def _on_session_ended(self, ok: bool, message: str):
+        if ok:
+            self._whole_here = True
+            self.dl_label.setText("✔ ההקלטה כולה במחשב" + (f"  ({message})" if message else ""))
+            self.dl_label.setStyleSheet("color:#2ecc71;")
+            self.save_btn.setEnabled(True)
+        else:
+            self.dl_label.setText(message)
+            self.dl_label.setStyleSheet("color:#e74c3c; font-weight:600;")
+
+    def _save_mp4(self):
+        if self.stream is None or self._saver is not None:
+            return
+        st = self.stream
+        try:
+            st.save_path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            self._flash(f"אי אפשר ליצור את התיקייה: {exc}", False)
+            return
+        self.save_btn.setEnabled(False)
+        self._flash("ממיר ל-MP4...")
+        self._saver = Mp4Saver(st.paths.raw, st.save_path, st.state.codec, st.seconds)
+        self._saver.done.connect(lambda p: self._saved(f"נשמר: {p}", True))
+        self._saver.failed.connect(lambda e: self._saved(f"השמירה נכשלה: {e}", False))
+        self._saver.start()
+
+    def _saved(self, text: str, ok: bool):
+        self._saver = None
+        self.save_btn.setEnabled(not ok)
+        self.msg_label.setStyleSheet(f"color:{'#2ecc71' if ok else '#e74c3c'}; font-weight:600;")
+        self.msg_label.setText(text)
+        self._msg_timer.start(12000)
 
     def _on_frame(self, img, t: float):
         self.view.set_image(img)
@@ -441,9 +537,14 @@ class PlayerWindow(QWidget):
 
     def closeEvent(self, event):
         self.engine.request_stop()
+        if self.session is not None:
+            self.session.request_stop()              # what already arrived stays in the cache for next time
         self.engine.wait(1500)
-        if self.engine.isRunning():                  # never drop a running QThread
-            _BACKGROUND.append(self.engine)
+        if self.session is not None:
+            self.session.wait(1500)
+        for thread in (self.engine, self.session, self._saver):
+            if thread is not None and thread.isRunning():     # never drop a running QThread
+                _BACKGROUND.append(thread)
         _BACKGROUND[:] = [e for e in _BACKGROUND if e.isRunning()]
         if self in _OPEN:
             _OPEN.remove(self)
@@ -452,6 +553,21 @@ class PlayerWindow(QWidget):
 
 def open_player(path: str) -> PlayerWindow:
     w = PlayerWindow(path)
+    _OPEN.append(w)
+    w.show()
+    return w
+
+
+def open_stream_player(cfg, channel: int, rec: dict, stream_type: int = 0) -> PlayerWindow:
+    """Play a recording straight from the NVR: the window opens at once, the download runs behind it."""
+    paths = streamcache.cache_paths(cfg.host, channel, str(rec.get("begin")), stream_type)
+    for other in _OPEN:                                # already open: two windows would write the same file
+        if other.stream is not None and other.stream.paths.raw == paths.raw:
+            other.showNormal()
+            other.raise_()
+            other.activateWindow()
+            return other
+    w = PlayerWindow(stream=prepare_stream(cfg, channel, rec, stream_type))
     _OPEN.append(w)
     w.show()
     return w

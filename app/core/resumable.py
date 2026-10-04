@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 from app.core import dvrip
+from app.core.frameindex import is_key_frame
 
 RETRY_DELAYS = (3, 5, 10, 20, 30, 60)      # seconds between reconnect attempts, then stays at the last one
 COMPLETE_RATIO = 0.9                         # a stream that ends normally below this share is treated as cut short
@@ -55,7 +56,8 @@ class ResumableDownload:
                  status: Callable[[str], None] = lambda text: None,
                  cancelled: Callable[[], bool] = lambda: False,
                  sleep: Callable[[float], None] = time.sleep,
-                 on_chunk: Callable[[object], None] = lambda client: None):
+                 on_chunk: Callable[[object], None] = lambda client: None,
+                 index=None):
         """open_stream() -> (client, iterator of payload chunks); client.close() is called when done.
         identity: what makes two downloads "the same recording" (channel, begin, end, stream type...)."""
         self.open_stream = open_stream
@@ -64,6 +66,8 @@ class ResumableDownload:
         self.identity = identity
         self.expected = expected
         self.progress, self.status, self.cancelled, self._sleep, self.on_chunk = progress, status, cancelled, sleep, on_chunk
+        self.index = index                       # optional app.core.frameindex.IndexWriter
+        self.fps_hint: int | None = None
         self.frames = 0
         self.size = 0
         self.last_hash = ""
@@ -79,6 +83,8 @@ class ResumableDownload:
             st = json.loads(self.state_path.read_text(encoding="utf-8"))
             if st.get("identity") != self.identity or not self.raw.exists() or self.raw.stat().st_size < st["size"]:
                 return False
+            if self.index is not None and not self.index.truncate(st["frames"]):
+                return False                       # the index does not match the saved state: start over
             self.frames, self.size, self.last_hash, self.codec = st["frames"], st["size"], st["last_hash"], st.get("codec")
             return True
         except (OSError, ValueError, KeyError):
@@ -101,6 +107,8 @@ class ResumableDownload:
             self._fh.close()
             self._fh = None
         self.raw.write_bytes(b"")
+        if self.index is not None:
+            self.index.reset()
         self._save()
 
     def discard(self):
@@ -128,6 +136,8 @@ class ResumableDownload:
                         continue
                     if self.codec is None:
                         self.codec = dvrip.sniff_codec(v)
+                    if self.index is not None:
+                        self.index.add(self.size, len(v), is_key_frame(v, self.codec))
                     self._fh.write(v)
                     self.frames += 1
                     seen += 1
@@ -135,6 +145,10 @@ class ResumableDownload:
                     self.size += len(v)
                     self._unsaved += len(v)
                     self.last_hash = _h(v)
+                if self.index is not None:                 # video first, then the index that points into it
+                    self._fh.flush()
+                    self.index.flush()
+                self.fps_hint = parser.fps_hint or self.fps_hint
                 self.progress(self.size, self.expected)
                 if self._unsaved >= SAVE_EVERY_BYTES:
                     self._save()
@@ -216,6 +230,8 @@ class ResumableDownload:
             if self._fh is not None:
                 self._fh.close()
                 self._fh = None
+            if self.index is not None:
+                self.index.close()
         self.state_path.unlink(missing_ok=True)
         return Result(self.codec, self.frames, self.size, self.reconnects, self.embedded, self.dropped, complete)
 

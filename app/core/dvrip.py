@@ -520,6 +520,7 @@ class XMFrameParser:
         # audio frames seen since the caller last drained this list:
         # (media_type, sample_rate_hz, raw_payload)
         self.audio: list[tuple[int, int, bytes]] = []
+        self.fps_hint: int | None = None     # frame rate written in the last key-frame header (1..60)
         self.embedded = 0     # frame headers found inside another frame's data (and removed)
         self.dropped = 0      # bytes skipped because they belonged to no frame (diagnostics)
 
@@ -611,6 +612,8 @@ class XMFrameParser:
                 break
             body = bytes(self.buf[hdr:hdr + length])
             media, rate_code = self.buf[4], self.buf[5]
+            if t == 0xFC and 1 <= media <= 60:
+                self.fps_hint = media
             del self.buf[:hdr + length]
             if t in (0xFC, 0xFD):
                 out.extend(self._split_embedded(body))

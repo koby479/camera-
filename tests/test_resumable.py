@@ -102,3 +102,15 @@ def test_short_stream_is_accepted_after_one_retry(tmp_path):
     nvr = FakeNVR(wire, [])
     r = make(tmp_path, nvr, expected=len(wire) * 10).run()       # NVR claims 10x more than it ever sends
     assert not r.complete and nvr.opened == 2
+
+
+def test_frame_index_matches_the_file_after_cuts_and_a_restart(tmp_path):
+    from app.core import frameindex
+    frames, wire = make_stream()
+    nvr = FakeNVR(wire, [25])
+    with pytest.raises(Cancelled):
+        make(tmp_path, nvr, cancelled=lambda: nvr.opened >= 2, index=frameindex.IndexWriter(tmp_path / "x.idx")).run()
+    make(tmp_path, FakeNVR(wire, [10, "refuse", 60]), index=frameindex.IndexWriter(tmp_path / "x.idx")).run()
+    raw = (tmp_path / "x.h264.part").read_bytes()
+    recs = frameindex.read_records(tmp_path / "x.idx", 0, 10 ** 6)
+    assert [raw[o:o + n] for o, n, _key in recs] == frames       # every frame indexed once, in order, at the right place
