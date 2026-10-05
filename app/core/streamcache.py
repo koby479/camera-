@@ -30,10 +30,13 @@ class CachePaths:
     meta: Path
 
 
-def cache_paths(host: str, channel: int, begin: str, stream_type: int, folder: Path | None = None) -> CachePaths:
-    stem = re.sub(r"[^0-9A-Za-z]+", "-", f"{host}_ch{channel + 1}_{begin}_s{stream_type}").strip("-")
+def cache_paths(host: str, channel: int, begin: str, stream_type: int, folder: Path | None = None,
+                segment: int = 0) -> CachePaths:
+    """segment: seconds from the start of the recording where this piece starts (0 = the beginning)."""
+    name = f"{host}_ch{channel + 1}_{begin}_s{stream_type}" + (f"_o{segment}" if segment else "")
+    stem = re.sub(r"[^0-9A-Za-z]+", "-", name).strip("-")
     d = Path(folder) if folder is not None else CACHE_DIR
-    return CachePaths(d / f"{stem}.raw", d / f"{stem}.idx", d / f"{stem}.meta.json")
+    return CachePaths(d / f"{stem}.raw", d / f"{stem}.idx2", d / f"{stem}.meta.json")
 
 
 def load_meta(paths: CachePaths) -> dict | None:

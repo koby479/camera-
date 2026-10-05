@@ -9,9 +9,9 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QImage, QPixmap
+from PyQt6.QtGui import QColor, QImage, QPainter, QPixmap
 from PyQt6.QtWidgets import (
-    QCheckBox, QComboBox, QHBoxLayout, QLabel, QProgressBar, QPushButton, QSizePolicy, QSlider, QStyle,
+    QCheckBox, QComboBox, QHBoxLayout, QLabel, QLineEdit, QPushButton, QSizePolicy, QSlider, QStyle,
     QVBoxLayout, QWidget,
 )
 
@@ -67,6 +67,31 @@ class _SeekSlider(QSlider):
             event.accept()
             return
         super().mouseReleaseEvent(event)
+
+
+class _CoverageBar(QWidget):
+    """A thin bar under the seek bar: the stretches of the recording that are already here and can be played."""
+
+    def __init__(self):
+        super().__init__()
+        self.setFixedHeight(8)
+        self._ranges: list = []
+        self._duration = 0.0
+
+    def set_ranges(self, ranges, duration: float):
+        self._ranges, self._duration = list(ranges), duration
+        self.update()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.fillRect(self.rect(), QColor("#2a2f3a"))
+        if self._duration > 0:
+            w = self.width()
+            for start, end in self._ranges:
+                x1 = int(w * max(0.0, start) / self._duration)
+                x2 = int(w * min(self._duration, end) / self._duration)
+                p.fillRect(x1, 0, max(2, x2 - x1), self.height(), QColor("#3b82f6"))
+        p.end()
 
 
 class _VideoView(QLabel):
@@ -166,12 +191,13 @@ class PlayerWindow(QWidget):
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.path = path
         self.stream = stream                      # a recording that is still downloading (None: a file on disk)
-        self.session = stream.session if stream else None
+        self.controller = stream.controller if stream else None
         self.start_time: datetime | None = stream.start_time if stream else recfmt.parse_stamp(Path(path).name)
         self.setWindowTitle(f"נגן הקלטות - {stream.title if stream else Path(path).name}")
         self._buffered = 0.0
-        self._whole_here = stream is None or stream.state.complete
+        self._whole_here = stream is None
         self._saver = None
+        self._jump_target: float | None = None        # a jump to a stretch that is not here yet, waiting for the NVR
         self.resize(1100, 740)
         self.duration = 0.0
         self.fps = 25.0
@@ -193,18 +219,23 @@ class PlayerWindow(QWidget):
         self.slider.seek_requested.connect(self._on_slider_seek)
         self.slider.scrubbing.connect(lambda on: setattr(self, "_scrubbing", on))
 
-        self.buf_bar = QProgressBar()             # how much of the recording is already here (streaming only)
-        self.buf_bar.setRange(0, 1000)
-        self.buf_bar.setTextVisible(False)
-        self.buf_bar.setFixedHeight(6)
-        self.buf_bar.setVisible(stream is not None)
+        self.cov_bar = _CoverageBar()             # which stretches are already here (streaming only)
+        self.cov_bar.setVisible(stream is not None)
+        self.jump_edit = QLineEdit()
+        self.jump_edit.setPlaceholderText("17:10:00")
+        self.jump_edit.setFixedWidth(90)
+        self.jump_edit.setToolTip("שעה בשעון של ההקלטה, למשל 17:10 או 17:10:30")
+        self.jump_edit.returnPressed.connect(self._jump_to_clock)
         self.buffer_label = QLabel("⏳ ממתין לנתונים מה-NVR...")
         self.buffer_label.setStyleSheet("font-size:14px; color:#f39c12; font-weight:600;")
         self.buffer_label.setVisible(False)
+        self.jump_label = QLabel("")
+        self.jump_label.setStyleSheet("font-size:14px; color:#f39c12; font-weight:600;")
+        self.jump_label.setVisible(False)
         self.dl_label = QLabel("")
         self.dl_label.setStyleSheet("color:#9fb4ff;")
         self.save_btn = QPushButton("💾 שמור כ-MP4")
-        self.save_btn.setToolTip("שומר את ההקלטה כקובץ MP4 בתיקיית Videos\\CameraRecordings (אחרי שירדה כולה)")
+        self.save_btn.setToolTip("שומר את ההקלטה כקובץ MP4 בתיקיית Videos\\CameraRecordings (אחרי שההקלטה ירדה כולה)")
         self.save_btn.setEnabled(False)
         self.save_btn.setVisible(stream is not None)
         self.save_btn.clicked.connect(self._save_mp4)
@@ -277,12 +308,21 @@ class PlayerWindow(QWidget):
         for w in (self.zoom_label, self.msg_label, self.save_btn, self.snap_btn, self.full_btn):
             row_options.addWidget(w)
 
+        row_jump = QHBoxLayout()
+        row_jump.addStretch(1)
+        row_jump.addWidget(QLabel("קפוץ לשעה:"))
+        row_jump.addWidget(self.jump_edit)
+        row_jump.addWidget(button("▶", "קפיצה לשעה שכתבת (Enter)", self._jump_to_clock, 36))
+        row_jump.addStretch(1)
+
         row_time = QHBoxLayout()
         row_time.addWidget(self.time_label)
         row_time.addSpacing(16)
         row_time.addWidget(self.wall_label)
         row_time.addSpacing(16)
         row_time.addWidget(self.buffer_label)
+        row_time.addSpacing(10)
+        row_time.addWidget(self.jump_label)
         row_time.addStretch(1)
         row_time.addWidget(self.dl_label)
         row_time.addSpacing(10)
@@ -296,9 +336,10 @@ class PlayerWindow(QWidget):
         pl = QVBoxLayout(self.panel)
         pl.setContentsMargins(6, 2, 6, 6)
         pl.addWidget(self.slider)
-        pl.addWidget(self.buf_bar)
+        pl.addWidget(self.cov_bar)
         pl.addLayout(row_time)
         pl.addLayout(row_transport)
+        pl.addLayout(row_jump)
         pl.addLayout(row_options)
         pl.addWidget(help_label)
 
@@ -319,14 +360,13 @@ class PlayerWindow(QWidget):
         self.engine.progress.connect(self._on_progress)
         self.engine.buffering_changed.connect(self.buffer_label.setVisible)
         self.engine.duration_changed.connect(self._on_duration)
-        if self.session is not None:
-            self.session.progress.connect(self._on_session_progress)
-            self.session.note.connect(self.dl_label.setText)
-            self.session.ended.connect(self._on_session_ended)
-            self.session.start()
-        elif stream is not None:
-            self.dl_label.setText("✔ ההקלטה כולה במחשב")
-            self.save_btn.setEnabled(True)
+        self.engine.seek_pending.connect(self._on_seek_pending)
+        self.engine.coverage.connect(self._on_coverage)
+        if self.controller is not None:
+            self.controller.start()                  # before the engine: the engine reads what it fetches
+            self._poll_timer = QTimer(self)          # parented: dies with the window
+            self._poll_timer.timeout.connect(self._poll)
+            self._poll_timer.start(500)
         self.engine.start()
 
     # ---- from the engine ------------------------------------------------------
@@ -343,38 +383,84 @@ class PlayerWindow(QWidget):
 
     def _on_progress(self, buffered: float, whole_here: bool):
         self._buffered = buffered
-        if self.duration > 0:
-            self.buf_bar.setValue(min(1000, int(1000 * buffered / self.duration)))
         self._whole_here = whole_here
 
-    def _on_slider_seek(self, ms: int):
-        t = ms / 1000.0
-        if self.stream is not None and not self._whole_here and t > self._buffered + 1.0:
-            self._flash(f"אפשר לקפוץ רק עד מה שכבר ירד ({fmt_clock(self._buffered)})", False)
+    def _on_coverage(self, ranges):
+        self.cov_bar.set_ranges(ranges, self.duration)
+
+    def _jump_to_clock(self):
+        """Jump to a time of day, e.g. 17:10, in the clock of the recording."""
+        m = re.fullmatch(r"\s*(\d{1,2}):(\d{2})(?::(\d{2}))?\s*", self.jump_edit.text())
+        if not m:
+            self._flash("כתוב שעה כמו 17:10 או 17:10:30", False)
+            return
+        if self.start_time is None:
+            self._flash("לא ידועה שעת ההתחלה של ההקלטה", False)
+            return
+        try:
+            target = self.start_time.replace(hour=int(m[1]), minute=int(m[2]), second=int(m[3] or 0), microsecond=0)
+        except ValueError:
+            self._flash("השעה לא תקינה", False)
+            return
+        if target < self.start_time:
+            target += timedelta(days=1)              # a recording that runs past midnight
+        t = (target - self.start_time).total_seconds()
+        if self.duration and t > self.duration + 1:
+            end = (self.start_time + timedelta(seconds=self.duration)).strftime("%H:%M:%S")
+            self._flash(f"השעה מחוץ להקלטה (עד {end})", False)
+            return
         self.engine.seek(t)
 
-    # ---- the download behind a streaming window -----------------------------
-    def _on_session_progress(self, done: int, total: int):
-        mb = done / (1024 * 1024)
-        if total:
-            self.dl_label.setText(f"⬇ ירד {min(100, int(100 * done / total))}%  ({mb:.0f}/{total / (1024 * 1024):.0f} MB)")
-        else:
-            self.dl_label.setText(f"⬇ ירד {mb:.0f} MB")
+    def _on_slider_seek(self, ms: int):
+        self.engine.seek(ms / 1000.0)
 
-    def _on_session_ended(self, ok: bool, message: str):
-        if ok:
+    def _on_seek_pending(self, target: float):
+        self._jump_target = target if target >= 0 else None
+        self._update_jump_label()
+
+    def _update_jump_label(self):
+        t = self._jump_target
+        if t is None:
+            self.jump_label.setVisible(False)
+            return
+        when = ((self.start_time + timedelta(seconds=t)).strftime("%H:%M:%S") if self.start_time is not None
+                else fmt_clock(t))
+        text = f"⏳ קופץ ל-{when}"
+        status = self.controller.status if self.controller is not None else ""
+        if status:
+            text += f"  ({status})"
+        self.jump_label.setText(text)
+        self.jump_label.setVisible(True)
+
+    # ---- the download behind a streaming window -----------------------------
+    def _poll(self):
+        snap = self.controller.snapshot()
+        if snap["whole_ready"]:
             self._whole_here = True
-            self.dl_label.setText("✔ ההקלטה כולה במחשב" + (f"  ({message})" if message else ""))
+            self.dl_label.setText("✔ ההקלטה כולה במחשב")
             self.dl_label.setStyleSheet("color:#2ecc71;")
-            self.save_btn.setEnabled(True)
-        else:
-            self.dl_label.setText(message)
+            self.save_btn.setEnabled(self._saver is None)
+        elif snap["failed"] and snap["active_offset"] is None:
+            self.dl_label.setText(snap["failed"])
             self.dl_label.setStyleSheet("color:#e74c3c; font-weight:600;")
+        else:
+            self.dl_label.setStyleSheet("color:#9fb4ff;")
+            speed = f"  ·  {snap['rate'] / 1048576:.1f} MB/s" if snap["rate"] else ""
+            if snap["active_offset"] is not None and snap["origin"] is not None:
+                start = recfmt.clock_text(snap["origin"] + snap["active_offset"])
+                self.dl_label.setText(f"⬇ מוריד מ-{start}  ·  {snap['bytes'] / 1048576:.0f} MB{speed}")
+            else:
+                self.dl_label.setText(snap["status"])
+        if self._jump_target is not None:
+            self._update_jump_label()
 
     def _save_mp4(self):
         if self.stream is None or self._saver is not None:
             return
         st = self.stream
+        if not st.controller.whole_ready():
+            self._flash("אפשר לשמור רק אחרי שההקלטה ירדה כולה", False)
+            return
         try:
             st.save_path.parent.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
@@ -382,7 +468,8 @@ class PlayerWindow(QWidget):
             return
         self.save_btn.setEnabled(False)
         self._flash("ממיר ל-MP4...")
-        self._saver = Mp4Saver(st.paths.raw, st.save_path, st.state.codec, st.seconds)
+        main = st.controller.main
+        self._saver = Mp4Saver(main.paths.raw, st.save_path, main.state.codec, st.seconds)
         self._saver.done.connect(lambda p: self._saved(f"נשמר: {p}", True))
         self._saver.failed.connect(lambda e: self._saved(f"השמירה נכשלה: {e}", False))
         self._saver.start()
@@ -539,12 +626,10 @@ class PlayerWindow(QWidget):
 
     def closeEvent(self, event):
         self.engine.request_stop()
-        if self.session is not None:
-            self.session.request_stop()              # what already arrived stays in the cache for next time
+        if self.controller is not None:
+            self.controller.close()                  # stops the download; what already arrived stays in the cache
         self.engine.wait(1500)
-        if self.session is not None:
-            self.session.wait(1500)
-        for thread in (self.engine, self.session, self._saver):
+        for thread in (self.engine, self._saver):
             if thread is not None and thread.isRunning():     # never drop a running QThread
                 _BACKGROUND.append(thread)
         _BACKGROUND[:] = [e for e in _BACKGROUND if e.isRunning()]

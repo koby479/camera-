@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 from app.core import dvrip
+from app.core import frameindex
 from app.core.frameindex import is_key_frame
 
 RETRY_DELAYS = (3, 5, 10, 20, 30, 60)      # seconds between reconnect attempts, then stays at the last one
@@ -68,6 +69,7 @@ class ResumableDownload:
         self.progress, self.status, self.cancelled, self._sleep, self.on_chunk = progress, status, cancelled, sleep, on_chunk
         self.index = index                       # optional app.core.frameindex.IndexWriter
         self.fps_hint: int | None = None
+        self.first_stamp: int | None = None      # time (seconds, NVR wall clock) of the first key frame received
         self.frames = 0
         self.size = 0
         self.last_hash = ""
@@ -128,7 +130,8 @@ class ResumableDownload:
                 if not chunk:
                     continue
                 self.on_chunk(client)
-                for v in parser.feed(chunk):
+                for n, v in enumerate(parser.feed(chunk)):
+                    stamp = parser.stamps[n] if n < len(parser.stamps) else 0
                     if seen < self.frames:                      # already on disk: skip, but check it is the same stream
                         seen += 1
                         if seen == self.frames and _h(v) != self.last_hash:
@@ -137,7 +140,10 @@ class ResumableDownload:
                     if self.codec is None:
                         self.codec = dvrip.sniff_codec(v)
                     if self.index is not None:
-                        self.index.add(self.size, len(v), is_key_frame(v, self.codec))
+                        key = is_key_frame(v, self.codec)
+                        self.index.add(self.size, len(v), key, stamp if key else 0)
+                    if stamp and self.first_stamp is None:
+                        self.first_stamp = frameindex.stamp_to_seconds(stamp)
                     self._fh.write(v)
                     self.frames += 1
                     seen += 1

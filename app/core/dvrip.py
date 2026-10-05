@@ -425,9 +425,11 @@ class DVRIPClient:
         self._open_stream(MSG_PLAY_CLAIM, body("Claim"), MSG_PLAY_START, body("Start"),
                           first_data_timeout, "הקלטה")
 
-    def start_download(self, channel: int, item: dict, first_data_timeout: float = 12.0, stream_type: int = 0):
-        """Ask the NVR to send one recorded file as a download (msg 1426 packets)."""
-        param = {"FileName": item["name"], "PlayMode": "ByName", "StreamType": stream_type,
+    def start_download(self, channel: int, item: dict, first_data_timeout: float = 12.0, stream_type: int = 0,
+                       mode: str = "ByName"):
+        """Ask the NVR to send one recorded file as a download (msg 1426 packets). A later item["begin"] asks it
+        to start from the middle of the file (how a seek is done)."""
+        param = {"FileName": item["name"], "PlayMode": mode, "StreamType": stream_type,
                  "TransMode": "TCP", "Channel": channel, "Value": 0}
         def body(action):
             return {"Name": "OPPlayBack", "SessionID": self._sid(),
@@ -521,6 +523,7 @@ class XMFrameParser:
         # (media_type, sample_rate_hz, raw_payload)
         self.audio: list[tuple[int, int, bytes]] = []
         self.fps_hint: int | None = None     # frame rate written in the last key-frame header (1..60)
+        self.stamps: list[int] = []          # for the frames the last feed() returned: the header time of a key frame, else 0
         self.embedded = 0     # frame headers found inside another frame's data (and removed)
         self.dropped = 0      # bytes skipped because they belonged to no frame (diagnostics)
 
@@ -553,11 +556,14 @@ class XMFrameParser:
         return 8, int.from_bytes(b[i + 6:i + 8], "little")
 
     def _split_embedded(self, body: bytes) -> list[bytes]:
+        return [f for f, _s in self._split_stamped(body, 0)]
+
+    def _split_stamped(self, body: bytes, stamp: int) -> list[tuple[bytes, int]]:
         """The NVR sometimes declares a frame length that also covers the frames that follow it, so
         their XM headers end up inside the video data. HEVC/H.264 payloads can never contain
         00 00 01 FC/FD/FA/F9 (0xFD.. is an invalid NAL header, and 00 00 01 is escaped), so a
         header that fits exactly inside the body is a real frame: cut it out."""
-        out: list[bytes] = []
+        out: list[tuple[bytes, int]] = []
         start = pos = 0
         while True:
             j = body.find(b"\x00\x00\x01", pos)
@@ -572,22 +578,24 @@ class XMFrameParser:
                 continue
             hdr, length = h
             if j > start:
-                out.append(body[start:j])
+                out.append((body[start:j], stamp if start == 0 else 0))
             inner = body[j + hdr:j + hdr + length]
             t = body[j + 3]
             self.embedded += 1
             if t in (0xFC, 0xFD):
-                out.extend(self._split_embedded(inner))
+                inner_stamp = int.from_bytes(body[j + 8:j + 12], "little") if t == 0xFC else 0
+                out.extend(self._split_stamped(inner, inner_stamp))
             elif t == 0xFA and inner:
                 self.audio.append((body[j + 4], AUDIO_RATES.get(body[j + 5], 8000), inner))
             start = pos = j + hdr + length
         if start < len(body):
-            out.append(body[start:])
+            out.append((body[start:], stamp if start == 0 else 0))
         return out
 
     def feed(self, data: bytes) -> list[bytes]:
         self.buf += data
         out: list[bytes] = []
+        stamps: list[int] = []
         while True:
             i = self._find_start()
             if i == -1:
@@ -612,13 +620,19 @@ class XMFrameParser:
                 break
             body = bytes(self.buf[hdr:hdr + length])
             media, rate_code = self.buf[4], self.buf[5]
-            if t == 0xFC and 1 <= media <= 60:
-                self.fps_hint = media
+            stamp = 0
+            if t == 0xFC:                                   # key frame header: media type, fps, w/8, h/8, time, length
+                if 1 <= rate_code <= 60:
+                    self.fps_hint = rate_code
+                stamp = int.from_bytes(self.buf[8:12], "little")
             del self.buf[:hdr + length]
             if t in (0xFC, 0xFD):
-                out.extend(self._split_embedded(body))
+                for frame, st in self._split_stamped(body, stamp):
+                    out.append(frame)
+                    stamps.append(st)
             elif t == 0xFA and body:
                 self.audio.append((media, AUDIO_RATES.get(rate_code, 8000), body))
+        self.stamps = stamps
         return out
 
 

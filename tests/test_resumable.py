@@ -113,4 +113,4 @@ def test_frame_index_matches_the_file_after_cuts_and_a_restart(tmp_path):
     make(tmp_path, FakeNVR(wire, [10, "refuse", 60]), index=frameindex.IndexWriter(tmp_path / "x.idx")).run()
     raw = (tmp_path / "x.h264.part").read_bytes()
     recs = frameindex.read_records(tmp_path / "x.idx", 0, 10 ** 6)
-    assert [raw[o:o + n] for o, n, _key in recs] == frames       # every frame indexed once, in order, at the right place
+    assert [raw[o:o + n] for o, n, _key, _stamp in recs] == frames       # every frame indexed once, in order, at the right place

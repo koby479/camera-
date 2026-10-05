@@ -62,3 +62,8 @@ def parse_stamp(filename: str) -> datetime | None:
         return datetime(*map(int, m.groups()))
     except ValueError:
         return None
+
+
+def clock_text(wall_seconds: float) -> str:
+    """HH:MM:SS of a time on the NVR's wall-clock scale (see frameindex.wall_seconds)."""
+    return datetime.utcfromtimestamp(wall_seconds).strftime("%H:%M:%S")

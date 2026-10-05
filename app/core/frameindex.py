@@ -2,12 +2,38 @@
 so the player can jump to any already-downloaded point without a container format. Qt-free, unit-tested."""
 from __future__ import annotations
 
+import calendar
 import os
 import struct
+from datetime import datetime
 from pathlib import Path
 
-REC = struct.Struct("<QIB")          # offset in the raw file, length, 1 = key frame
+REC = struct.Struct("<QIBI")         # offset in the raw file, length, 1 = key frame, time stamp of a key frame (XM format, 0 = none)
 REC_SIZE = REC.size
+
+
+def stamp_to_seconds(raw: int) -> int | None:
+    """The time the NVR writes into every key-frame header (4 bytes, bit-packed) as seconds since 1970 on the
+    NVR's own wall clock, or None when it is not a valid date."""
+    try:
+        dt = datetime((raw >> 26) + 2000, (raw >> 22) & 0xF, (raw >> 17) & 0x1F,
+                      (raw >> 12) & 0x1F, (raw >> 6) & 0x3F, raw & 0x3F)
+    except ValueError:
+        return None
+    return calendar.timegm(dt.timetuple())
+
+
+def seconds_to_stamp(seconds: int) -> int:
+    d = datetime.utcfromtimestamp(seconds)
+    return (d.second | d.minute << 6 | d.hour << 12 | d.day << 17 | d.month << 22 | (d.year - 2000) << 26)
+
+
+def wall_seconds(text: str) -> int | None:
+    """'2026-10-01 17:10:00' (how the NVR lists recordings) -> seconds on the same wall-clock scale."""
+    try:
+        return calendar.timegm(datetime.strptime(text, "%Y-%m-%d %H:%M:%S").timetuple())
+    except (ValueError, TypeError):
+        return None
 
 
 def is_key_frame(data: bytes, codec: str | None) -> bool:
@@ -34,7 +60,7 @@ def count_records(path) -> int:
         return 0
 
 
-def read_records(path, start: int, stop: int) -> list[tuple[int, int, bool]]:
+def read_records(path, start: int, stop: int) -> list[tuple[int, int, bool, int]]:
     """Records start..stop-1 (only whole records are ever returned)."""
     try:
         with open(path, "rb") as f:
@@ -42,7 +68,7 @@ def read_records(path, start: int, stop: int) -> list[tuple[int, int, bool]]:
             blob = f.read(max(0, stop - start) * REC_SIZE)
     except OSError:
         return []
-    return [(o, n, bool(k)) for o, n, k in REC.iter_unpack(blob[:len(blob) // REC_SIZE * REC_SIZE])]
+    return [(o, n, bool(k), st) for o, n, k, st in REC.iter_unpack(blob[:len(blob) // REC_SIZE * REC_SIZE])]
 
 
 class IndexWriter:
@@ -75,9 +101,9 @@ class IndexWriter:
             f.truncate(frames * REC_SIZE)
         return True
 
-    def add(self, offset: int, length: int, key: bool):
+    def add(self, offset: int, length: int, key: bool, stamp: int = 0):
         self._open()
-        self._fh.write(REC.pack(offset, length, 1 if key else 0))
+        self._fh.write(REC.pack(offset, length, 1 if key else 0, stamp))
 
     def flush(self):
         if self._fh is not None:

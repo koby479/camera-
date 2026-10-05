@@ -28,6 +28,8 @@ class PlayerEngine(QThread):
     buffering_changed = pyqtSignal(bool)             # waiting for data that is still being downloaded
     progress = pyqtSignal(float, bool)               # seconds that can be played now, whole recording here
     duration_changed = pyqtSignal(float)
+    seek_pending = pyqtSignal(float)                 # a jump is waiting for the download: its target, or -1 when done / cancelled
+    coverage = pyqtSignal(object)                    # [(start, end)] seconds of the recording that can be played now
 
     def __init__(self, path: str, source_factory=VideoSource, max_width: int = 1280):
         super().__init__()
@@ -58,6 +60,7 @@ class PlayerEngine(QThread):
         self._last_shown = 0.0
         self._buffering = False
         self._last_report = 0.0
+        self._deferred: float | None = None          # target of a jump beyond what has been downloaded
 
     # ---- commands (called from the window) -------------------------------
     def _post(self, **kw):
@@ -131,6 +134,7 @@ class PlayerEngine(QThread):
     def _loop(self):
         while self._running:
             self._report()
+            self._check_deferred()
             if self._dirty and self._apply_commands():
                 continue
             if self._paused:
@@ -217,6 +221,9 @@ class PlayerEngine(QThread):
         buffered = getattr(self.source, "buffered_until", None)
         if buffered is not None:
             self.progress.emit(float(buffered), bool(getattr(self.source, "complete", True)))
+        ranges = getattr(self.source, "ranges", None)
+        if ranges is not None:
+            self.coverage.emit(list(ranges()))
 
     def _resync_forward(self):
         """Continue forward from the frame on screen (after backwards play or a step)."""
@@ -286,6 +293,48 @@ class PlayerEngine(QThread):
         self._display(item, force=True, push=True)
         self._clock_restart()
 
+    def _seek_to(self, t: float) -> bool:
+        """Jump now, or, when the target is further than the download has reached, remember it and keep
+        playing: it happens by itself the moment the data is there. True when the picture moved."""
+        covers = getattr(self.source, "covers", None)
+        if covers is not None:                       # a recording fetched in pieces: ask for the piece that has t
+            if not covers(t):
+                self._deferred = t
+                self.seek_pending.emit(t)
+                self.source.request(t)
+                return False
+            self._goto(t)
+            return True
+        reach = getattr(self.source, "buffered_until", None)
+        if reach is not None and not getattr(self.source, "complete", True) and t > reach + 1.0:
+            self._deferred = t
+            self.seek_pending.emit(t)
+            return False
+        self._goto(t)
+        return True
+
+    def _clear_deferred(self):
+        if self._deferred is not None:
+            self._deferred = None
+            self.seek_pending.emit(-1.0)
+
+    def _check_deferred(self):
+        t = self._deferred
+        if t is None:
+            return
+        covers = getattr(self.source, "covers", None)
+        if covers is not None:
+            if covers(t):
+                self._clear_deferred()
+                self._goto(t)
+            else:
+                self.source.request(t)               # (asking again is harmless: the same jump is not repeated)
+            return
+        reach = float(getattr(self.source, "buffered_until", 1e9))
+        if reach >= t or getattr(self.source, "complete", False):
+            self._clear_deferred()
+            self._goto(t)
+
     def _do_step(self, n: int):
         self._set_paused(True)                       # (a frame already decoded, in _carry, is used by the first step)
         for _ in range(abs(n)):
@@ -345,12 +394,12 @@ class PlayerEngine(QThread):
                 self._resync_forward()
         if "paused" in cmd:
             self._set_paused(cmd["paused"])
+        if "seek" in cmd or "seek_rel" in cmd or cmd.get("step"):
+            self._clear_deferred()                   # any new navigation replaces a jump that was waiting
         if "seek" in cmd:
-            self._goto(cmd["seek"])
-            moved = True
+            moved = self._seek_to(cmd["seek"]) or moved
         if "seek_rel" in cmd:
-            self._goto(self._pos + cmd["seek_rel"])
-            moved = True
+            moved = self._seek_to(self._pos + cmd["seek_rel"]) or moved
         if cmd.get("step"):
             self._do_step(cmd["step"])
             moved = True

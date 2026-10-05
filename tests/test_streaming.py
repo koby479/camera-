@@ -62,11 +62,15 @@ class IndexTests(unittest.TestCase):
         w.add(0, 100, True)
         w.add(100, 40, False)
         w.flush()
+        w.add(140, 30, True, 12345)
+        w.flush()
+        self.assertEqual(frameindex.read_records(self.path, 2, 3), [(140, 30, True, 12345)])    # the time stamp is kept
+        frameindex.IndexWriter(self.path).truncate(2)
         with open(self.path, "ab") as f:
             f.write(b"\x01\x02")                                   # a record still being written
         self.assertEqual(frameindex.count_records(self.path), 2)
-        self.assertEqual(frameindex.read_records(self.path, 0, 3), [(0, 100, True), (100, 40, False)])
-        self.assertEqual(frameindex.read_records(self.path, 1, 2), [(100, 40, False)])
+        self.assertEqual(frameindex.read_records(self.path, 0, 3), [(0, 100, True, 0), (100, 40, False, 0)])
+        self.assertEqual(frameindex.read_records(self.path, 1, 2), [(100, 40, False, 0)])
 
     def test_truncate_and_reset(self):
         w = frameindex.IndexWriter(self.path)
@@ -186,7 +190,7 @@ class StreamSourceTests(unittest.TestCase):
             for i in range(50, 100):
                 data = bytes([i]) + b"payload"
                 f.write(data)
-                fi.write(frameindex.REC.pack(offset, len(data), 1 if i % 10 == 0 else 0))
+                fi.write(frameindex.REC.pack(offset, len(data), 1 if i % 10 == 0 else 0, 0))
                 offset += len(data)
         self.state.complete = True
         rest = [item[1].n for item in gen if item is not WAITING]
@@ -294,12 +298,36 @@ class EngineWithDownloadTests(unittest.TestCase):
         self.assertTrue(wait_for(lambda: self.eng._paused and self.shown[-1] >= 9.8))   # now it runs to the real end
         self.assertFalse(self.eng._buffering)
 
-    def test_seek_beyond_what_arrived_goes_to_the_last_available_frame(self):
+    def test_jump_ahead_waits_for_the_download_then_happens_by_itself(self):
+        self.eng.set_paused(True)
+        self.assertTrue(wait_for(lambda: self.eng._paused))
+        before = self.shown[-1]
+        self.eng.seek(8.0)                                                  # only 3 s have arrived
+        self.assertTrue(wait_for(lambda: self.eng._deferred == 8.0))
+        time.sleep(0.3)
+        self.assertEqual(self.shown[-1], before)                           # the picture did not move
+        self.src.avail = 100                                                # the download got there
+        self.assertTrue(wait_for(lambda: self.shown[-1] == 8.0))
+        self.assertIsNone(self.eng._deferred)
+
+    def test_a_new_jump_cancels_the_one_that_was_waiting(self):
         self.eng.set_paused(True)
         self.assertTrue(wait_for(lambda: self.eng._paused))
         self.eng.seek(8.0)
-        self.assertTrue(wait_for(lambda: self.shown[-1] >= 2.8))
-        self.assertLessEqual(self.shown[-1], 2.9)
+        self.assertTrue(wait_for(lambda: self.eng._deferred == 8.0))
+        self.eng.seek(1.0)                                                  # inside what is here: happens now
+        self.assertTrue(wait_for(lambda: self.shown[-1] == 1.0 and self.eng._deferred is None))
+        self.src.avail = 100
+        time.sleep(0.4)
+        self.assertEqual(self.shown[-1], 1.0)                               # the old jump did not come back
+
+    def test_playing_continues_while_a_jump_waits(self):
+        self.eng.set_speed(1)
+        self.eng.seek(8.0)
+        self.assertTrue(wait_for(lambda: self.eng._deferred == 8.0))
+        self.assertFalse(self.eng._paused)
+        n = len(self.shown)
+        self.assertTrue(wait_for(lambda: len(self.shown) > n + 3))         # still showing frames meanwhile
 
     def test_backwards_works_on_what_is_already_here(self):
         self.eng.set_paused(True)
@@ -317,15 +345,15 @@ if __name__ == "__main__":
 
 
 class EndToEndTests(unittest.TestCase):
-    """The whole path behind '▶ נגן במלא' with a fake NVR: prepare -> download session -> player source."""
+    """The whole path behind the play button with a fake NVR: prepare -> controller downloads -> player source."""
 
-    def test_session_downloads_and_the_source_plays_it(self):
+    def test_prepare_download_and_play(self):
         from app.core.config import CameraConfig
         from app.ui import stream_session
         from tests.test_xm_embedded import fc, fd, nal
 
         frames = [nal(200 + i, i % 250 + 1) for i in range(60)]
-        wire = fc(frames[0]) + b"".join(fd(f) for f in frames[1:])
+        wire = fc(frames[0]) + b"".join(fd(f) for f in frames[1:])          # the helper's key frame says: 25 fps
 
         class FakeClient:
             def __init__(self, *a, **k):
@@ -337,7 +365,7 @@ class EndToEndTests(unittest.TestCase):
             def login(self):
                 pass
 
-            def start_download(self, channel, item, stream_type=0):
+            def start_download(self, channel, item, stream_type=0, mode="ByName"):
                 pass
 
             def read_download_payloads(self):
@@ -353,27 +381,112 @@ class EndToEndTests(unittest.TestCase):
         tmp = Path(tempfile.mkdtemp())
         old_client, old_cache, old_dec = dvrip.DVRIPClient, streamcache.CACHE_DIR, dvrip.H264Decoder
         dvrip.DVRIPClient, streamcache.CACHE_DIR, dvrip.H264Decoder = FakeClient, tmp, FakeDecoder
+        pb = again = None
         try:
             cfg = CameraConfig(name="nvr", host="1.2.3.4", port=34567, protocol="dvrip")
             rec = {"name": "f", "begin": "2026-10-01 08:00:00", "end": "2026-10-01 08:00:06", "size": len(wire)}
             pb = stream_session.prepare_stream(cfg, 0, rec, 0)
-            self.assertIsNotNone(pb.session)
-            self.assertAlmostEqual(pb.state.declared, 6.0)
             self.assertEqual(pb.title.split("·")[1].strip(), "ערוץ 1")
-            pb.session.run()                                         # synchronously, in this thread
-            self.assertTrue(pb.state.complete, pb.state.failed)
-            self.assertAlmostEqual(pb.state.fps, 10.0)               # 60 frames in the 6 s the NVR announced
-            meta = streamcache.load_meta(pb.paths)
-            self.assertTrue(meta["complete"] and meta["frames"] == 60)
+            self.assertAlmostEqual(pb.controller.declared, 6.0)
+            pb.controller.start()
+            self.assertTrue(wait_for(pb.controller.whole_ready), pb.controller.status)
             src = pb.factory(None)
             times = [round(t, 3) for t, _f in src.frames_from(0)]
-            self.assertEqual(times, [round(i / 10, 3) for i in range(60)])      # one per frame, 10 per second
-            self.assertEqual([round(t, 3) for t, _f in itertools.islice(src.frames_from(2.5), 2)], [2.5, 2.6])
-            self.assertAlmostEqual(src.duration, 6.0)
+            self.assertEqual(times, [round(i / 25, 3) for i in range(60)])      # 25 fps, as the stream says
+            self.assertEqual([round(t, 3) for t, _f in itertools.islice(src.frames_from(1.0), 2)], [1.0, 1.04])
+            pb.controller.close()
             # the next time the same recording is opened nothing is downloaded
             again = stream_session.prepare_stream(cfg, 0, rec, 0)
-            self.assertIsNone(again.session)
-            self.assertTrue(again.state.complete)
+            again.controller.start()
+            self.assertTrue(again.controller.whole_ready())
+            self.assertFalse(again.controller.main.active)
         finally:
+            for item in (pb, again):
+                if item is not None:
+                    item.controller.close()
             dvrip.DVRIPClient, streamcache.CACHE_DIR, dvrip.H264Decoder = old_client, old_cache, old_dec
             shutil.rmtree(tmp, ignore_errors=True)
+
+
+class FakePieces:
+    """What the engine sees of a recording fetched in pieces (see SegmentedSource): only some stretches are here."""
+    fps, width, height, total = 10.0, 8, 8, 100
+    duration, buffered_until, complete = 10.0, 10.0, False
+
+    def __init__(self):
+        self.have = [(0.0, 3.0)]
+        self.requested = []
+
+    def covers(self, t):
+        return any(s <= t <= e for s, e in self.have)
+
+    def ranges(self):
+        return list(self.have)
+
+    def request(self, t):
+        self.requested.append(t)
+
+    def frames_from(self, t):
+        i = max(0, int(t * self.fps + 1e-9))
+        while i < self.total:
+            ft = round(i / self.fps, 6)
+            if not self.covers(ft):
+                yield WAITING
+                continue
+            i += 1
+            yield ft, i - 1
+
+    to_rgb = staticmethod(FakeGrowing.to_rgb)
+
+    def close(self):
+        pass
+
+
+class EngineWithPiecesTests(unittest.TestCase):
+    def setUp(self):
+        from app.core.playerengine import PlayerEngine
+        self.src = FakePieces()
+        self.shown = []
+        shown = self.shown
+
+        class Rec(PlayerEngine):
+            def _emit(self, img, t):
+                shown.append(round(t, 3))
+                self.pending = False
+
+        self.eng = Rec("x", source_factory=lambda _p: self.src)
+        self.eng.start()
+        self.assertTrue(wait_for(lambda: self.shown))
+        self.eng.set_paused(True)
+        self.assertTrue(wait_for(lambda: self.eng._paused))
+
+    def tearDown(self):
+        self.eng.stop()
+
+    def test_a_jump_to_a_stretch_that_is_not_here_asks_for_it_and_happens_when_it_arrives(self):
+        before = self.shown[-1]
+        self.eng.seek(8.0)
+        self.assertTrue(wait_for(lambda: self.eng._deferred == 8.0))
+        self.assertIn(8.0, self.src.requested)                               # the piece for it was asked for
+        self.assertEqual(self.shown[-1], before)                             # and nothing moved meanwhile
+        self.src.have.append((7.0, 10.0))                                    # the NVR delivered it
+        self.assertTrue(wait_for(lambda: self.shown[-1] == 8.0))
+        self.assertIsNone(self.eng._deferred)
+
+    def test_a_jump_inside_what_is_here_happens_at_once(self):
+        self.eng.seek(2.0)
+        self.assertTrue(wait_for(lambda: self.shown[-1] == 2.0))
+        self.assertEqual(self.src.requested, [])
+
+    def test_playing_into_a_gap_waits_and_goes_on_when_the_next_piece_arrives(self):
+        self.eng.set_speed(16)
+        self.eng.seek(2.0)
+        self.assertTrue(wait_for(lambda: self.shown[-1] == 2.0))
+        self.eng.set_paused(False)
+        self.assertTrue(wait_for(lambda: self.eng._buffering))               # reached the end of the piece: waiting
+        self.src.have.append((3.0, 10.0))
+        self.assertTrue(wait_for(lambda: self.eng._paused and self.shown[-1] >= 9.8))
+
+
+if __name__ == "__main__":
+    unittest.main()
