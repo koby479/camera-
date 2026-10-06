@@ -3,10 +3,13 @@ Hold a button to move, release to stop. Works for cameras on a DVRIP recorder; w
 is decided by the camera - a refusal from the recorder is shown in the status line."""
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (QGridLayout, QHBoxLayout, QLabel, QPushButton, QSlider, QSpinBox, QVBoxLayout, QWidget)
 
 from app.core.ptz import PtzController
+
+HOLD_AFTER_MS = 180      # pressed longer than this = continuous movement; shorter = a small nudge
+NUDGE_MS = 90            # how long a nudge moves the camera (at the lowest speed)
 
 PAD = [("↖", "up_left"), ("↑", "up"), ("↗", "up_right"),
        ("←", "left"), ("■", None), ("→", "right"),
@@ -20,6 +23,13 @@ class PtzPanel(QWidget):
         super().__init__(parent, Qt.WindowType.Tool)
         self.cfg = cfg
         self._active: str | None = None
+        self._pressed: str | None = None
+        self._hold_timer = QTimer(self)
+        self._hold_timer.setSingleShot(True)
+        self._hold_timer.timeout.connect(self._begin_hold)
+        self._nudge_timer = QTimer(self)
+        self._nudge_timer.setSingleShot(True)
+        self._nudge_timer.timeout.connect(self._end_nudge)
         self.ctl = PtzController.for_cfg(cfg)
         self.setWindowTitle(f"שליטה במצלמה - {cfg.name}")
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
@@ -33,8 +43,8 @@ class PtzPanel(QWidget):
             b.setStyleSheet("font-size:20px; font-weight:bold;")
             b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             if name:
-                b.pressed.connect(lambda n=name: self._start(n))
-                b.released.connect(self._stop)
+                b.pressed.connect(lambda n=name: self._press(n))
+                b.released.connect(self._release)
             else:
                 b.setToolTip("עצור")
                 b.clicked.connect(self._stop)
@@ -48,8 +58,8 @@ class PtzPanel(QWidget):
                 b = QPushButton(text)
                 b.setFixedSize(40, 30)
                 b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-                b.pressed.connect(lambda n=name: self._start(n))
-                b.released.connect(self._stop)
+                b.pressed.connect(lambda n=name: self._press(n))
+                b.released.connect(self._release)
                 row.addWidget(b)
             return row
 
@@ -72,7 +82,7 @@ class PtzPanel(QWidget):
         presets.addWidget(go)
         presets.addWidget(save)
 
-        self.status = QLabel("החזק כפתור כדי להזיז, שחרר כדי לעצור")
+        self.status = QLabel("לחיצה קצרה = הזזה קטנה, החזקה = תנועה רצופה")
         self.status.setWordWrap(True)
         self.status.setStyleSheet("color:#9fb4ff;")
 
@@ -87,14 +97,37 @@ class PtzPanel(QWidget):
         root.addWidget(self.status)
         self.setFixedWidth(250)
 
-    def _start(self, name: str):
+    def _press(self, name: str):
         self._stop()
-        self._active = name
-        self.ctl.move(self.cfg.channel, name, self.speed.value())
+        self._pressed = name
+        self._hold_timer.start(HOLD_AFTER_MS)      # not yet moving: a quick click must stay a small step
+
+    def _begin_hold(self):
+        if self._pressed:
+            self._active = self._pressed
+            self._active_speed = self.speed.value()
+            self.ctl.move(self.cfg.channel, self._active, self._active_speed)
+
+    def _release(self):
+        name, self._pressed = self._pressed, None
+        if self._hold_timer.isActive():            # short click: a tiny movement at the lowest speed
+            self._hold_timer.stop()
+            if name:
+                self._active, self._active_speed = name, 1
+                self.ctl.move(self.cfg.channel, name, 1)
+                self._nudge_timer.start(NUDGE_MS)
+        else:
+            self._stop()
+
+    def _end_nudge(self):
+        self._stop()
 
     def _stop(self):
+        self._hold_timer.stop()
+        self._nudge_timer.stop()
+        self._pressed = None
         if self._active:
-            self.ctl.stop(self.cfg.channel, self._active, self.speed.value())
+            self.ctl.stop(self.cfg.channel, self._active, getattr(self, "_active_speed", self.speed.value()))
             self._active = None
 
     def _show_result(self, ok: bool, text: str):

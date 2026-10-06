@@ -233,7 +233,10 @@ class CameraWorker(QThread):
                         break
             except (OSError, dvrip.DVRIPError) as exc:
                 print(f"[dvrip] ch{self.cfg.channel + 1} {stream}: stream ended: {exc}", file=sys.stderr)
-                self._emit_status(CameraStatus.DEAD)
+                # The recorder answers but the channel never sends video = nothing is plugged into it.
+                # Anything else (the stream broke, stalled, was refused) = a camera that is there but not working.
+                self._emit_status(CameraStatus.NO_CAMERA if isinstance(exc, dvrip.DVRIPNoVideo) and not got_video
+                                  else CameraStatus.DEAD)
             finally:
                 client.close()
 

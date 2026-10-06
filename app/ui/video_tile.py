@@ -15,15 +15,17 @@ from app.core.zoom import ZoomState, fit_rect
 STATUS_LABELS = {
     CameraStatus.UNKNOWN: ("מתחבר...", "#888888"),
     CameraStatus.ACTIVE: ("פעילה", "#2ecc71"),
-    CameraStatus.DEAD: ("מתה", "#e67e22"),
-    CameraStatus.OFFLINE: ("לא מחוברת", "#e74c3c"),
+    CameraStatus.DEAD: ("מחוברת, לא עובדת", "#e67e22"),
+    CameraStatus.NO_CAMERA: ("לא מחוברת", "#8a8f9a"),
+    CameraStatus.OFFLINE: ("ה-NVR לא נגיש", "#e74c3c"),
     CameraStatus.AUTH_FAILED: ("שם משתמש/סיסמה שגויים", "#e74c3c"),
 }
 
 
 STATUS_HINTS = {
     CameraStatus.OFFLINE: "אין מענה מהכתובת. בדוק כתובת, פורט, אינטרנט ופורט-פורוורד",
-    CameraStatus.DEAD: "החיבור נפתח אבל לא מגיעה תמונה. נסה זרם אחר או התחבר מחדש",
+    CameraStatus.DEAD: "המצלמה מחוברת אבל התמונה נקטעה או לא מתפענחת. נסה זרם אחר או התחבר מחדש",
+    CameraStatus.NO_CAMERA: "אין מצלמה מחוברת בערוץ הזה (ה-NVR עונה אבל לא שולח וידאו)",
     CameraStatus.AUTH_FAILED: "שם המשתמש או הסיסמה שגויים. תקן ב'שנה פרטי חיבור'",
 }
 
@@ -137,7 +139,9 @@ class VideoTile(QWidget):
         self.title_label.setText(self.cfg.name)
         self.status_label.setText(f"● {text}")
         self.status_label.setStyleSheet(f"color:{color}; font-weight:bold; padding:2px;")
-        if status in (CameraStatus.OFFLINE, CameraStatus.DEAD, CameraStatus.AUTH_FAILED):
+        if status == CameraStatus.NO_CAMERA:
+            self.video_label.setText("אין מצלמה מחוברת בערוץ הזה\n\nהתוכנה תבדוק שוב מדי פעם")
+        elif status in (CameraStatus.OFFLINE, CameraStatus.DEAD, CameraStatus.AUTH_FAILED):
             self.video_label.setText(f"{text}\n\nקליק ימני ← התחבר מחדש")
 
     def begin_reconnect(self, main: bool = False):
@@ -270,7 +274,7 @@ class VideoTile(QWidget):
     # ---- right-click menu -----------------------------------------------
     def contextMenuEvent(self, event):
         menu = QMenu(self)
-        broken = self.status in (CameraStatus.OFFLINE, CameraStatus.DEAD, CameraStatus.AUTH_FAILED)
+        broken = self.status in (CameraStatus.OFFLINE, CameraStatus.DEAD, CameraStatus.AUTH_FAILED, CameraStatus.NO_CAMERA)
         a_reconnect = menu.addAction("🔄 התחבר מחדש" + ("   ← המצלמה לא מחוברת" if broken else ""))
         if broken:
             f = a_reconnect.font()

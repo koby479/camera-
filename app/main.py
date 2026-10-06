@@ -501,7 +501,7 @@ class MainWindow(QMainWindow):
         self._leave_fullscreen()              # otherwise the window stays full screen with an empty grid
         self.remove_camera_tile(camera_id)
 
-    BROKEN = (CameraStatus.OFFLINE, CameraStatus.DEAD, CameraStatus.AUTH_FAILED)
+    BROKEN = (CameraStatus.OFFLINE, CameraStatus.DEAD, CameraStatus.AUTH_FAILED, CameraStatus.NO_CAMERA)
 
     def _hide_tile(self, camera_id: str):
         """Remove a broken camera from the grid. Only for this run: it is not deleted from the saved

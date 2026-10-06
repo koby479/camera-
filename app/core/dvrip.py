@@ -80,6 +80,10 @@ class DVRIPError(Exception):
         self.code = code
 
 
+class DVRIPNoVideo(DVRIPError):
+    """Login is fine but the channel never delivers video: usually no camera is plugged into it."""
+
+
 class DVRIPAuthError(DVRIPError):
     """Device answered but rejected the username/password."""
 
@@ -254,7 +258,7 @@ class DVRIPClient:
         self._send(self.sock, start_msg, start)
         if self._wait_for_data(self.sock, first_data_timeout):
             return
-        raise DVRIPError(f"ה-NVR אישר את ההתחברות אבל לא שלח {what}")
+        raise DVRIPNoVideo(f"ה-NVR אישר את ההתחברות אבל לא שלח {what}")
 
     def start_monitor(self, channel: int = 0, stream: str = "Main", first_data_timeout: float = 6.0):
         """Open a live-video stream."""

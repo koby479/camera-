@@ -10,6 +10,7 @@ and a refusal comes back as another code - that text is handed to on_result so t
 from __future__ import annotations
 
 import queue
+import select
 import socket
 import sys
 import threading
@@ -28,9 +29,8 @@ DIRECTIONS = {
 LENS = {"zoom_in": "ZoomTile", "zoom_out": "ZoomWide", "focus_far": "FocusFar", "focus_near": "FocusNear",
         "iris_open": "IrisLarge", "iris_close": "IrisSmall"}
 
-_RET_TEXT = {100: "בוצע", 101: "בוצע", 102: "בוצע",
-             203: "שם משתמש/סיסמה שגויים", 205: "שם משתמש/סיסמה שגויים",
-             607: "אין הרשאה לשליטה במצלמה", 515: "בוצע"}
+_OK_CODES = (100, 101, 102, 515)
+_RET_TEXT = {203: "שם משתמש/סיסמה שגויים", 205: "שם משתמש/סיסמה שגויים", 607: "אין הרשאה לשליטה במצלמה"}
 
 
 def _params(channel: int, step: int, preset: int, cmd: str) -> dict:
@@ -59,6 +59,7 @@ class PtzController:
         self._client: dvrip.DVRIPClient | None = None
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
+        self._want_ok = False
 
     # ---- public (non-blocking) --------------------------------------------------
     def send(self, channel: int, command: str, step: int = 5, preset: int = -1):
@@ -113,16 +114,19 @@ class PtzController:
             c.close()
 
     def _run(self):
+        """Commands are sent at once and never wait for the recorder's answer (a slow answer used to delay the
+        "stop" and the camera kept moving). Answers are collected between commands."""
         last_used = time.monotonic()
         while True:
             try:
-                channel, cmd, step, preset = self._q.get(timeout=5.0)
+                channel, cmd, step, preset = self._q.get(timeout=0.2)
             except queue.Empty:
-                if self._client is not None:
-                    try:
+                try:
+                    if self._client is not None:
+                        self._poll_replies()
                         self._client.keepalive_if_due()
-                    except OSError:
-                        self._drop()
+                except (OSError, dvrip.DVRIPError):
+                    self._drop()
                 if time.monotonic() - last_used > IDLE_CLOSE:
                     self._drop()
                     return
@@ -142,31 +146,37 @@ class PtzController:
 
     def _deliver(self, channel: int, cmd: str, step: int, preset: int):
         c = self._client
-        c.keepalive_if_due()
+        # a command that is not a plain movement (preset, tour) gets its answer reported as success too
+        self._want_ok = preset not in (-1, 65535)
         c._send(c.sock, MSG_PTZ, {"Name": "OPPTZControl", "SessionID": c._sid(),
                                   "OPPTZControl": {"Command": cmd, "Parameter": _params(channel, step, preset, cmd)}})
-        ret = None
-        c.sock.settimeout(2.5)
-        try:
-            for _ in range(4):                      # skip keepalive replies, wait for the answer to this command
-                try:
-                    _mid, _s, _q, payload = c._recv_packet(c.sock)
-                except socket.timeout:
-                    break
-                data = dvrip._parse_json(payload)
-                if data.get("Name") == "OPPTZControl" or "OPPTZControl" in data:
-                    ret = data.get("Ret")
-                    break
-        finally:
+        if self._q.empty():
+            self._poll_replies(0.05)
+
+    def _poll_replies(self, first_wait: float = 0.0):
+        """Read the answers that already arrived (never blocks for long)."""
+        c = self._client
+        wait = first_wait
+        for _ in range(8):
+            if not select.select([c.sock], [], [], wait)[0]:
+                return
+            wait = 0.0
+            c.sock.settimeout(1.0)
             try:
-                c.sock.settimeout(c.timeout)
-            except OSError:
-                pass
-        if preset == 65535:                         # the end of a movement: nothing to report
-            return
-        if ret is None:
-            self._report(True, "הפקודה נשלחה (ה-NVR לא אישר)")
-        elif ret in _RET_TEXT:
-            self._report(ret in (100, 101, 102, 515), "הפקודה נשלחה" if ret in (100, 101, 102, 515) else _RET_TEXT[ret])
+                _mid, _s, _q, payload = c._recv_packet(c.sock)
+            finally:
+                try:
+                    c.sock.settimeout(c.timeout)
+                except OSError:
+                    pass
+            data = dvrip._parse_json(payload)
+            if data.get("Name") == "OPPTZControl" or "OPPTZControl" in data:
+                self._handle_ret(data.get("Ret"))
+
+    def _handle_ret(self, ret):
+        ok = ret in _OK_CODES or ret is None
+        if ok:
+            if self._want_ok:
+                self._report(True, "הפקודה נשלחה")
         else:
-            self._report(False, f"ה-NVR דחה את הפקודה (קוד {ret}) - ייתכן שהמצלמה לא תומכת בכך")
+            self._report(False, _RET_TEXT.get(ret) or f"ה-NVR דחה את הפקודה (קוד {ret}) - ייתכן שהמצלמה לא תומכת בכך")

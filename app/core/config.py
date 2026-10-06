@@ -13,6 +13,7 @@ class CameraStatus(Enum):
     DEAD = "dead"           # מתה (מגיבה אך אין תמונה תקינה)
     OFFLINE = "offline"     # לא מחוברת
     AUTH_FAILED = "auth_failed"   # שם משתמש/סיסמה שגויים
+    NO_CAMERA = "no_camera"       # ה-NVR עונה אבל לא מגיע וידאו מהערוץ: אין מצלמה מחוברת
 
 
 @dataclass
