@@ -37,7 +37,6 @@ DEFAULT_CAP = 1280          # the external ffmpeg never delivers wider than this
 QUEUE_MAX = 60              # decoded pictures waiting to be picked up; the oldest are dropped beyond this
 
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-_cv_env_lock = threading.Lock()
 
 
 # ---------------------------------------------------------------- frames
@@ -297,7 +296,7 @@ class OpenCVBackend:
         self._srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._srv.bind(("127.0.0.1", 0))
         self._srv.listen(1)
-        self._srv.settimeout(6.0)
+        self._srv.settimeout(15.0)
         port = self._srv.getsockname()[1]
         self._thread = threading.Thread(target=self._reader, args=(f"tcp://127.0.0.1:{port}",), daemon=True)
         self._thread.start()
@@ -306,25 +305,17 @@ class OpenCVBackend:
         except OSError as exc:
             self.close()
             raise RuntimeError(f"OpenCV לא התחבר לשקע המקומי ({exc})") from exc
-        self._conn.settimeout(10.0)
+        self._conn.settimeout(30.0)
 
     def _reader(self, url: str):
         cv2 = self._cv2
         # Probe on a small amount of data: the default (5 MB, 5 s) would hold the first picture back for
-        # many seconds on a live stream. The RTSP cameras set this same variable themselves before each open,
-        # so the previous value is put back afterwards.
-        key = "OPENCV_FFMPEG_CAPTURE_OPTIONS"
+        # many seconds on a live stream. The variable is process-wide and the RTSP cameras set it themselves
+        # before each of their opens, so it is simply set here (not held locked: opening blocks until data arrives,
+        # and several channels connect at the same moment).
         try:
-            with _cv_env_lock:
-                prev = os.environ.get(key)
-                os.environ[key] = "probesize;65536|analyzeduration;0"
-                try:
-                    cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
-                finally:
-                    if prev is None:
-                        os.environ.pop(key, None)
-                    else:
-                        os.environ[key] = prev
+            os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "probesize;65536|analyzeduration;0"
+            cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
         except Exception as exc:  # noqa: BLE001
             print(f"[decoder:opencv] open failed: {exc!r}", file=sys.stderr)
             return

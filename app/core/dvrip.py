@@ -23,6 +23,7 @@ import json
 import select
 import socket
 import string
+import sys
 import struct
 import time
 
@@ -656,12 +657,16 @@ class H264Decoder:
     backends in app/core/decoders.py (PyAV, an external ffmpeg.exe, or OpenCV's FFmpeg), chosen in the
     "מפענח וידאו" menu; "auto" takes the first one that works on this PC."""
 
+    FALLBACK_AFTER = 60       # video packets without a single picture before the next backend is tried
+
     def __init__(self, max_width: int | None = None):
         from app.core import decoders
         self._decoders = decoders
         self._names = decoders.candidates()       # raises right away when no backend can work on this PC
         self.max_width = max_width
         self._impl = None
+        self._pos = 0                             # index in self._names of the backend in use
+        self._fed = self._got = 0
         self.codec: str | None = None
         self.backend: str | None = None
 
@@ -676,6 +681,15 @@ class H264Decoder:
         from app.core import decoders
         return decoders.to_rgb(frame, max_width)
 
+    def _open(self, start: int):
+        try:
+            impl = self._decoders.open_backend(self.codec, self._names[start:], self.max_width)
+        except RuntimeError as exc:                # the callers end the stream cleanly on DVRIPError and try again later
+            raise DVRIPError(f"אף מפענח וידאו לא הצליח לעלות ({exc})") from exc
+        self._pos = self._names.index(impl.name)
+        self._impl, self.backend = impl, impl.name
+        self._fed = 0
+
     def decode_raw(self, data: bytes):
         """Yield decoded frames (PyAV frames or decoders.NpFrame; no colour conversion yet)."""
         if self._impl is None:
@@ -683,9 +697,19 @@ class H264Decoder:
             if codec is None:
                 return                      # wait for a key frame
             self.codec = codec
-            self._impl = self._decoders.open_backend(codec, self._names, self.max_width)
-            self.backend = self._impl.name
-        yield from self._impl.feed(data)
+            self._open(0)
+        for frame in self._impl.feed(data):
+            self._got += 1
+            yield frame
+        self._fed += 1
+        if not self._got and self._fed >= self.FALLBACK_AFTER and self._pos + 1 < len(self._names):
+            # e.g. PyAV loads fine but never produces a picture on this PC: move on to the next backend
+            old = self._impl.name
+            self._impl.close()
+            self._impl = None
+            self._open(self._pos + 1)
+            print(f"[decoder] {old} produced no pictures from {self.FALLBACK_AFTER} video packets - "
+                  f"switched to {self.backend}", file=sys.stderr)
 
     def close(self):
         if self._impl is not None:

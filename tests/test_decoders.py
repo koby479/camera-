@@ -149,6 +149,94 @@ class ChoiceTests(unittest.TestCase):
         self.assertEqual((d.codec, d.backend), ("h264", "ffmpeg"))
         self.assertGreaterEqual(len(frames), 1)
 
+    def _fake_backends(self, first_gives_pictures: bool):
+        class Silent:
+            name = "pyav"
+            closed = False
+
+            def __init__(self, *a):
+                pass
+
+            def feed(self, data):
+                return iter(())
+
+            def close(self):
+                Silent.closed = True
+
+        class Works:
+            name = "ffmpeg"
+
+            def __init__(self, *a):
+                pass
+
+            def feed(self, data):
+                yield decoders.NpFrame(np.zeros((4, 4, 3), np.uint8))
+
+            def close(self):
+                pass
+
+        class WorksFirst(Works):
+            name = "pyav"
+
+        saved = dict(decoders._CLASSES)
+        decoders._CLASSES.update({"pyav": WorksFirst if first_gives_pictures else Silent, "ffmpeg": Works})
+        decoders._avail.update({"pyav": None, "ffmpeg": None, "opencv": "x"})
+        self.addCleanup(decoders._CLASSES.update, saved)
+        return Silent
+
+    KEY = b"\x00\x00\x01\x67\x00\x00\x00"
+
+    def test_front_decoder_moves_on_when_a_backend_never_produces_a_picture(self):
+        Silent = self._fake_backends(first_gives_pictures=False)
+        d = dvrip.H264Decoder()
+        out = []
+        for _ in range(dvrip.H264Decoder.FALLBACK_AFTER + 3):
+            out += list(d.decode_raw(self.KEY))
+        self.assertEqual(d.backend, "ffmpeg")
+        self.assertTrue(Silent.closed)
+        self.assertGreaterEqual(len(out), 1)
+
+    def test_front_decoder_stays_when_pictures_come(self):
+        self._fake_backends(first_gives_pictures=True)
+        d = dvrip.H264Decoder()
+        for _ in range(dvrip.H264Decoder.FALLBACK_AFTER + 3):
+            list(d.decode_raw(self.KEY))
+        self.assertEqual(d.backend, "pyav")
+
+    def test_no_backend_can_start_raises_a_stream_error_not_a_crash(self):
+        class Bad:
+            def __init__(self, *a):
+                raise RuntimeError("blocked")
+
+        saved = dict(decoders._CLASSES)
+        decoders._CLASSES.update({"pyav": Bad, "ffmpeg": Bad})
+        self.addCleanup(decoders._CLASSES.update, saved)
+        decoders._avail.update({"pyav": None, "ffmpeg": None, "opencv": "x"})
+        d = dvrip.H264Decoder()
+        with self.assertRaises(dvrip.DVRIPError):
+            list(d.decode_raw(self.KEY))
+
+    def test_several_opencv_backends_can_start_at_once(self):
+        try:
+            import cv2                                      # noqa: F401
+        except ImportError:
+            self.skipTest("no opencv")
+        import threading
+        results = []
+
+        def run():
+            try:
+                results.append(len(_decode_all("opencv")))
+            except Exception as exc:  # noqa: BLE001
+                results.append(repr(exc))
+
+        threads = [threading.Thread(target=run) for _ in range(5)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(60)
+        self.assertEqual(results, [10] * 5)
+
     def test_self_test_reports_each_backend(self):
         decoders._avail.update({"pyav": "missing", "ffmpeg": "missing", "opencv": "missing"})
         res = decoders.self_test()

@@ -226,7 +226,7 @@ class CameraWorker(QThread):
                             img = QImage(arr.data, w, h, 3 * w, QImage.Format.Format_RGB888).copy()
                             self.pending = True
                             self.frame_ready.emit(self.cfg.id, img)
-                    if not decoded_any and video_seen == 100:
+                    if not decoded_any and video_seen == 160:
                         print(f"[dvrip] {video_seen} video frames but none decoded (codec={decoder.codec})",
                               file=sys.stderr)
                         self._emit_status(CameraStatus.DEAD)
