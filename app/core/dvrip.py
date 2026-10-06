@@ -651,15 +651,19 @@ def sniff_codec(data: bytes) -> str | None:
 
 
 class H264Decoder:
-    """Video decoder on top of PyAV ('pip install av'). Despite the name it picks
-    H.264 or H.265 (HEVC) automatically from the first key frame, because many
-    XM/Provision recorders are set to H.265."""
+    """Video decoder front. Despite the name it picks H.264 or H.265 (HEVC) automatically from the first key
+    frame, because many XM/Provision recorders are set to H.265. The actual decoding is done by one of the
+    backends in app/core/decoders.py (PyAV, an external ffmpeg.exe, or OpenCV's FFmpeg), chosen in the
+    "מפענח וידאו" menu; "auto" takes the first one that works on this PC."""
 
-    def __init__(self):
-        import av  # noqa: WPS433 - optional dependency, imported lazily
-        self._av = av
-        self._ctx = None
+    def __init__(self, max_width: int | None = None):
+        from app.core import decoders
+        self._decoders = decoders
+        self._names = decoders.candidates()       # raises right away when no backend can work on this PC
+        self.max_width = max_width
+        self._impl = None
         self.codec: str | None = None
+        self.backend: str | None = None
 
     def decode(self, data: bytes):
         """Yield BGR numpy frames (full size)."""
@@ -668,33 +672,31 @@ class H264Decoder:
 
     @staticmethod
     def to_rgb(frame, max_width: int | None = None):
-        """Scale an av frame down to at most max_width and return an RGB ndarray.
-        Scaling here, off the GUI thread, is what keeps the UI light."""
-        w, h = frame.width, frame.height
-        if max_width and w > max_width:
-            h = max(2, int(round(h * max_width / w / 2)) * 2)
-            w = max_width
-        return np.ascontiguousarray(frame.reformat(width=w, height=h, format="rgb24").to_ndarray())
+        """Scale a decoded frame down to at most max_width and return an RGB ndarray."""
+        from app.core import decoders
+        return decoders.to_rgb(frame, max_width)
 
     def decode_raw(self, data: bytes):
-        """Yield decoded av.VideoFrame objects (no colour conversion yet)."""
-        if self._ctx is None:
+        """Yield decoded frames (PyAV frames or decoders.NpFrame; no colour conversion yet)."""
+        if self._impl is None:
             codec = sniff_codec(data)
             if codec is None:
                 return                      # wait for a key frame
             self.codec = codec
-            self._ctx = self._av.CodecContext.create(codec, "r")
-            try:                                    # use all cores: 2560x1440 HEVC is too heavy for one
-                self._ctx.thread_type = "AUTO"
-                self._ctx.thread_count = 0
-            except Exception:  # noqa: BLE001 - older PyAV: keep the defaults
-                pass
-        for packet in self._ctx.parse(data):
-            try:
-                for frame in self._ctx.decode(packet):
-                    yield frame
-            except Exception:  # noqa: BLE001 - a broken frame must not kill the stream
-                continue
+            self._impl = self._decoders.open_backend(codec, self._names, self.max_width)
+            self.backend = self._impl.name
+        yield from self._impl.feed(data)
+
+    def close(self):
+        if self._impl is not None:
+            self._impl.close()
+            self._impl = None
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def check_login(host: str, port: int, username: str, password: str, timeout: float = 6.0):

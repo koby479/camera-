@@ -97,7 +97,7 @@ class _PlayWorker(QThread):
             step = f"פתיחת הקלטה בערוץ {self.channel + 1}"
             c.start_playback(self.channel, self.item, first_data_timeout=12.0, stream_type=self.stream_type)
             step = "ניגון"
-            parser, decoder = dvrip.XMFrameParser(), dvrip.H264Decoder()
+            parser, decoder = dvrip.XMFrameParser(), dvrip.H264Decoder(self.max_width)
             shown = False
             for chunk in c.read_video_payloads():
                 if not self._running:

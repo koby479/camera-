@@ -53,11 +53,8 @@ class VideoSource:
 
     @staticmethod
     def to_rgb(frame, max_width: int | None = None):
-        w, h = frame.width, frame.height
-        if max_width and w > max_width:
-            h = max(2, int(round(h * max_width / w / 2)) * 2)
-            w = max_width
-        return np.ascontiguousarray(frame.reformat(width=w, height=h, format="rgb24").to_ndarray())
+        from app.core import decoders           # accepts PyAV frames and the other backends' frames alike
+        return decoders.to_rgb(frame, max_width)
 
     def close(self):
         try:

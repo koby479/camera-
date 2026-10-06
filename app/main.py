@@ -4,10 +4,10 @@ import sys
 from collections import deque
 
 from PyQt6.QtWidgets import (
-    QApplication, QMainWindow, QSplitter, QMessageBox
+    QApplication, QFileDialog, QMainWindow, QSplitter, QMessageBox
 )
 from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QKeyEvent, QKeySequence, QShortcut
+from PyQt6.QtGui import QAction, QActionGroup, QKeyEvent, QKeySequence, QShortcut
 
 from app.core.camera import CameraConfig, CameraWorker, CameraStatus, NO_SUB
 from app.core.store import load_all, save_all, DEFAULT_MAX_TILES
@@ -18,7 +18,7 @@ from app.ui.add_dialog import AddDeviceDialog
 from app.ui.scan_dialog import ScanDialog
 from app.ui.nvr_probe_worker import NvrProbeWorker
 from app.core.audio import AudioPlayer
-from app.core import names
+from app.core import decoders, names, settings
 from app.ui.playback_dialog import PlaybackDialog
 
 
@@ -70,12 +70,72 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("F11"), self, activated=self._on_f11)
         self.sidebar.disconnect_all_requested.connect(self._close_all_tiles)
 
+        self._build_decoder_menu()
+
         for nvr in self.nvrs:
             item = self.sidebar.add_nvr_node(nvr)
             self.nvr_items[nvr.id] = item
         for cam in self.singles:
             item = self.sidebar.add_single_node(cam)
             self.single_items[cam.id] = item
+
+    # ---- video decoder menu ----------------------------------------
+    def _build_decoder_menu(self):
+        menu = self.menuBar().addMenu("מפענח וידאו")
+        group = QActionGroup(self)
+        group.setExclusive(True)
+        current = decoders.configured()
+        for key, label in decoders.CHOICES:
+            act = QAction(label, self)
+            act.setCheckable(True)
+            act.setChecked(key == current)
+            act.triggered.connect(lambda _checked=False, k=key: self._set_decoder(k))
+            group.addAction(act)
+            menu.addAction(act)
+        menu.addSeparator()
+        menu.addAction("בחר קובץ ffmpeg.exe...", self._pick_ffmpeg)
+        menu.addAction("בדוק איזה מפענח עובד במחשב הזה", self._test_decoders)
+        self._decoder_test = None            # (thread, result dict) while a test runs
+        self._decoder_timer = QTimer(self)
+        self._decoder_timer.setInterval(200)
+        self._decoder_timer.timeout.connect(self._decoder_test_poll)
+
+    def _set_decoder(self, key: str):
+        settings.put("decoder", key)
+        decoders.reset()
+        QMessageBox.information(self, "מפענח וידאו",
+                                "הבחירה נשמרה. היא תחול על כל חיבור חדש של מצלמה "
+                                "(נתק את המצלמה וחבר אותה שוב, או הפעל את התוכנה מחדש).")
+
+    def _pick_ffmpeg(self):
+        path, _ = QFileDialog.getOpenFileName(self, "בחר את ffmpeg.exe", "", "ffmpeg (ffmpeg.exe ffmpeg);;כל הקבצים (*)")
+        if path:
+            settings.put("ffmpeg_path", path)
+            decoders.reset()
+
+    def _test_decoders(self):
+        if self._decoder_test:
+            return
+        result: dict = {}
+        import threading
+        t = threading.Thread(target=lambda: result.update(decoders.self_test()), daemon=True)
+        self._decoder_test = (t, result)
+        t.start()
+        self.statusBar().showMessage("בודק מפענחים...")
+        self._decoder_timer.start()
+
+    def _decoder_test_poll(self):
+        if not self._decoder_test or self._decoder_test[0].is_alive():
+            return
+        self._decoder_timer.stop()
+        _t, result = self._decoder_test
+        self._decoder_test = None
+        self.statusBar().clearMessage()
+        lines = []
+        for name in decoders.BACKENDS:
+            ok, text = result.get(name, (False, "לא נבדק"))
+            lines.append(f"{'✔' if ok else '✘'}  {decoders.LABELS[name]}: {text}")
+        QMessageBox.information(self, "תוצאות בדיקת המפענחים", "\n".join(lines))
 
     # ---------------------------------------------------------------
     def on_add_nvr(self):

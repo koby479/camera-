@@ -139,9 +139,9 @@ class CameraWorker(QThread):
         from app.core import dvrip
 
         try:
-            dvrip.H264Decoder()          # fail early if PyAV is missing
+            dvrip.H264Decoder()          # fail early if no video decoder works on this PC
         except Exception as exc:  # noqa: BLE001
-            print(f"[dvrip] video decoder unavailable (pip install av): {exc}", file=sys.stderr)
+            print(f"[dvrip] video decoder unavailable: {exc}", file=sys.stderr)
             self._emit_status(CameraStatus.DEAD)
             return
 
@@ -184,7 +184,7 @@ class CameraWorker(QThread):
             got_video = False
             try:
                 client.start_monitor(self.cfg.channel, stream)
-                parser, decoder = dvrip.XMFrameParser(), dvrip.H264Decoder()
+                parser, decoder = dvrip.XMFrameParser(), dvrip.H264Decoder(self.max_width)
                 logged_audio = False
                 video_seen, decoded_any = 0, False
                 stats = StreamStats()
@@ -211,7 +211,7 @@ class CameraWorker(QThread):
                             if not decoded_any:
                                 decoded_any = got_video = True
                                 delay = 3.0
-                                print(f"[dvrip] ch{self.cfg.channel + 1} {stream}: video OK ({decoder.codec}, "
+                                print(f"[dvrip] ch{self.cfg.channel + 1} {stream}: video OK ({decoder.codec} via {decoder.backend}, "
                                       f"{frame.width}x{frame.height})", file=sys.stderr)
                             self._emit_status(CameraStatus.ACTIVE)
                             stats.frame()
