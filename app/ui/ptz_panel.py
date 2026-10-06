@@ -4,12 +4,12 @@ is decided by the camera - a refusal from the recorder is shown in the status li
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
-from PyQt6.QtWidgets import (QGridLayout, QHBoxLayout, QLabel, QPushButton, QSlider, QSpinBox, QVBoxLayout, QWidget)
+from PyQt6.QtWidgets import (QComboBox, QGridLayout, QHBoxLayout, QLabel, QPushButton, QSlider, QSpinBox, QVBoxLayout, QWidget)
 
-from app.core.ptz import PtzController
+from app.core.ptz import STOP_MODES, PtzController
 
 HOLD_AFTER_MS = 180      # pressed longer than this = continuous movement; shorter = a small nudge
-NUDGE_MS = 90            # how long a nudge moves the camera (at the lowest speed)
+NUDGE_MS = 150           # how long a nudge moves the camera (at the lowest speed)
 
 PAD = [("↖", "up_left"), ("↑", "up"), ("↗", "up_right"),
        ("←", "left"), ("■", None), ("→", "right"),
@@ -82,6 +82,16 @@ class PtzPanel(QWidget):
         presets.addWidget(go)
         presets.addWidget(save)
 
+        self.stop_mode = QComboBox()
+        for key, label in STOP_MODES.items():
+            self.stop_mode.addItem(label, key)
+        self.stop_mode.setToolTip("אם המצלמה לא נעצרת אחרי לחיצה, נסה שיטת עצירה אחרת")
+        self.stop_mode.currentIndexChanged.connect(
+            lambda _i: setattr(self.ctl, "stop_mode", self.stop_mode.currentData()))
+        mode_row = QHBoxLayout()
+        mode_row.addWidget(QLabel("שיטת עצירה:"))
+        mode_row.addWidget(self.stop_mode, 1)
+
         self.status = QLabel("לחיצה קצרה = הזזה קטנה, החזקה = תנועה רצופה")
         self.status.setWordWrap(True)
         self.status.setStyleSheet("color:#9fb4ff;")
@@ -94,6 +104,7 @@ class PtzPanel(QWidget):
         root.addLayout(pair("פוקוס", "focus_near", "focus_far"))
         root.addLayout(pair("צמצם", "iris_close", "iris_open"))
         root.addLayout(presets)
+        root.addLayout(mode_row)
         root.addWidget(self.status)
         self.setFixedWidth(250)
 
@@ -133,6 +144,10 @@ class PtzPanel(QWidget):
     def _show_result(self, ok: bool, text: str):
         self.status.setStyleSheet("color:#2ecc71;" if ok else "color:#e74c3c; font-weight:600;")
         self.status.setText(text)
+
+    def showEvent(self, event):
+        self.ctl.warm_up()                    # connect before the first click
+        super().showEvent(event)
 
     def hideEvent(self, event):
         self._stop()                          # never leave the camera moving

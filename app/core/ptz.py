@@ -33,8 +33,15 @@ _OK_CODES = (100, 101, 102, 515)
 _RET_TEXT = {203: "שם משתמש/סיסמה שגויים", 205: "שם משתמש/סיסמה שגויים", 607: "אין הרשאה לשליטה במצלמה"}
 
 
-def _params(channel: int, step: int, preset: int, cmd: str) -> dict:
-    return {"AUX": {"Number": 0, "Status": "On"}, "Channel": channel, "MenuOpts": "Enter",
+STOP_MODES = {
+    "std": "סטנדרטית",          # same command with Preset 65535 (what most recorders expect)
+    "aux_off": "עם AUX כבוי",   # as above, and the AUX flag switched off
+    "step0": "מהירות 0",        # a new "move" with speed 0
+}
+
+
+def _params(channel: int, step: int, preset: int, cmd: str, aux: str = "On") -> dict:
+    return {"AUX": {"Number": 0, "Status": aux}, "Channel": channel, "MenuOpts": "Enter",
             "POINT": {"bottom": 0, "left": 0, "right": 0, "top": 0}, "Pattern": "SetBegin",
             "Preset": preset, "Step": step, "Tour": 1 if "Tour" in cmd else 0}
 
@@ -60,10 +67,11 @@ class PtzController:
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
         self._want_ok = False
+        self.stop_mode = "std"
 
     # ---- public (non-blocking) --------------------------------------------------
-    def send(self, channel: int, command: str, step: int = 5, preset: int = -1):
-        self._q.put((channel, command, int(step), int(preset)))
+    def send(self, channel: int, command: str, step: int = 5, preset: int = -1, aux: str = "On"):
+        self._q.put((channel, command, int(step), int(preset), aux))
         self._ensure_thread()
 
     def move(self, channel: int, name: str, speed: int = 5):
@@ -73,9 +81,29 @@ class PtzController:
             self.send(channel, cmd, speed, -1)
 
     def stop(self, channel: int, name: str, speed: int = 5):
+        """End a movement. A stop that the recorder or camera misses leaves the camera running to the end of its
+        range, so it is sent three times (now, +0.15 s, +0.4 s); repeating a stop is harmless."""
         cmd = DIRECTIONS.get(name) or LENS.get(name)
-        if cmd:
-            self.send(channel, cmd, speed, 65535)
+        if not cmd:
+            return
+        self._send_stop(channel, cmd, speed)
+        for delay in (0.15, 0.4):
+            t = threading.Timer(delay, self._send_stop, (channel, cmd, speed))
+            t.daemon = True
+            t.start()
+
+    def _send_stop(self, channel: int, cmd: str, speed: int):
+        mode = self.stop_mode
+        if mode == "step0":
+            self.send(channel, cmd, 0, -1)
+        else:
+            self.send(channel, cmd, speed, 65535, aux="Off" if mode == "aux_off" else "On")
+
+    def warm_up(self):
+        """Open the connection now, so the first click is not delayed by connecting (a start and a stop that wait
+        together reach the recorder at the same instant and the stop can be lost)."""
+        self._q.put(None)
+        self._ensure_thread()
 
     def goto_preset(self, channel: int, number: int):
         self.send(channel, "GotoPreset", 5, number)
@@ -119,7 +147,7 @@ class PtzController:
         last_used = time.monotonic()
         while True:
             try:
-                channel, cmd, step, preset = self._q.get(timeout=0.2)
+                item = self._q.get(timeout=0.2)
             except queue.Empty:
                 try:
                     if self._client is not None:
@@ -135,7 +163,8 @@ class PtzController:
             try:
                 if self._client is None:
                     self._connect()
-                self._deliver(channel, cmd, step, preset)
+                if item is not None:
+                    self._deliver(*item)
             except dvrip.DVRIPAuthError as exc:
                 self._drop()
                 self._report(False, str(exc))
@@ -144,12 +173,13 @@ class PtzController:
                 print(f"[ptz] {self.host}: {exc!r}", file=sys.stderr)
                 self._report(False, f"אין חיבור ל-NVR ({exc})")
 
-    def _deliver(self, channel: int, cmd: str, step: int, preset: int):
+    def _deliver(self, channel: int, cmd: str, step: int, preset: int, aux: str = "On"):
         c = self._client
+        print(f"[ptz] -> {cmd} step={step} preset={preset} aux={aux}", file=sys.stderr)
         # a command that is not a plain movement (preset, tour) gets its answer reported as success too
         self._want_ok = preset not in (-1, 65535)
         c._send(c.sock, MSG_PTZ, {"Name": "OPPTZControl", "SessionID": c._sid(),
-                                  "OPPTZControl": {"Command": cmd, "Parameter": _params(channel, step, preset, cmd)}})
+                                  "OPPTZControl": {"Command": cmd, "Parameter": _params(channel, step, preset, cmd, aux)}})
         if self._q.empty():
             self._poll_replies(0.05)
 
@@ -174,6 +204,7 @@ class PtzController:
                 self._handle_ret(data.get("Ret"))
 
     def _handle_ret(self, ret):
+        print(f"[ptz] <- Ret={ret}", file=sys.stderr)
         ok = ret in _OK_CODES or ret is None
         if ok:
             if self._want_ok:
