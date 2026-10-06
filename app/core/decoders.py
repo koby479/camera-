@@ -319,7 +319,7 @@ class OpenCVBackend:
         # before each of their opens, so it is simply set here (not held locked: opening blocks until data arrives,
         # and several channels connect at the same moment).
         try:
-            os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "probesize;65536|analyzeduration;0"
+            os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "probesize;65536|analyzeduration;0|fflags;discardcorrupt"
             cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
         except Exception as exc:  # noqa: BLE001
             print(f"[decoder:opencv] open failed: {exc!r}", file=sys.stderr)
