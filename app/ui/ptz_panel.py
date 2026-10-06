@@ -46,8 +46,8 @@ class PtzPanel(QWidget):
                 b.pressed.connect(lambda n=name: self._press(n))
                 b.released.connect(self._release)
             else:
-                b.setToolTip("עצור")
-                b.clicked.connect(self._stop)
+                b.setToolTip("עצירת חירום: שולח עצירה לכל הכיוונים")
+                b.clicked.connect(self._emergency_stop)
             grid.addWidget(b, i // 3, i % 3)
 
         def pair(title, minus, plus):
@@ -129,6 +129,10 @@ class PtzPanel(QWidget):
                 self._nudge_timer.start(NUDGE_MS)
         else:
             self._stop()
+
+    def _emergency_stop(self):
+        self._stop()
+        self.ctl.stop_all(self.cfg.channel)
 
     def _end_nudge(self):
         self._stop()

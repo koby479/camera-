@@ -34,10 +34,13 @@ _RET_TEXT = {203: "שם משתמש/סיסמה שגויים", 205: "שם משתמ
 
 
 STOP_MODES = {
+    "all": "כל השיטות יחד (מומלץ)",   # recorders differ in what they accept as "stop": send every known form
     "std": "סטנדרטית",          # same command with Preset 65535 (what most recorders expect)
     "aux_off": "עם AUX כבוי",   # as above, and the AUX flag switched off
     "step0": "מהירות 0",        # a new "move" with speed 0
 }
+ALL_STOPS = (("std", 65535, None, "On"), ("aux_off", 65535, None, "Off"),
+             ("step0", -1, 0, "On"), ("std0", 65535, 0, "On"))   # (name, Preset, Step or None = as given, AUX)
 
 
 def _params(channel: int, step: int, preset: int, cmd: str, aux: str = "On") -> dict:
@@ -67,7 +70,7 @@ class PtzController:
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
         self._want_ok = False
-        self.stop_mode = "std"
+        self.stop_mode = "all"
 
     # ---- public (non-blocking) --------------------------------------------------
     def send(self, channel: int, command: str, step: int = 5, preset: int = -1, aux: str = "On"):
@@ -92,9 +95,17 @@ class PtzController:
             t.daemon = True
             t.start()
 
-    def _send_stop(self, channel: int, cmd: str, speed: int):
-        mode = self.stop_mode
-        if mode == "step0":
+    def stop_all(self, channel: int):
+        """Emergency stop: every stop form for every direction and lens movement."""
+        for cmd in list(DIRECTIONS.values()) + list(LENS.values()):
+            self._send_stop(channel, cmd, 4, force_all=True)
+
+    def _send_stop(self, channel: int, cmd: str, speed: int, force_all: bool = False):
+        mode = "all" if force_all else self.stop_mode
+        if mode == "all":
+            for _name, preset, step, aux in ALL_STOPS:
+                self.send(channel, cmd, speed if step is None else step, preset, aux=aux)
+        elif mode == "step0":
             self.send(channel, cmd, 0, -1)
         else:
             self.send(channel, cmd, speed, 65535, aux="Off" if mode == "aux_off" else "On")
@@ -200,6 +211,8 @@ class PtzController:
                 except OSError:
                     pass
             data = dvrip._parse_json(payload)
+            if _mid != 1007:                                   # not a keepalive answer
+                print(f"[ptz] <- msg {_mid}: {payload[:160]!r}", file=sys.stderr)
             if data.get("Name") == "OPPTZControl" or "OPPTZControl" in data:
                 self._handle_ret(data.get("Ret"))
 
