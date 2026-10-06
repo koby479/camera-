@@ -95,7 +95,8 @@ class VideoTile(QWidget):
         self.ptz_btn = QPushButton("PTZ")
         self.ptz_btn.setFixedSize(34, 22)
         self.ptz_btn.setToolTip("שליטה במצלמה: הזזה, זום, פוקוס (למצלמות שתומכות)")
-        self.ptz_btn.setStyleSheet("QPushButton{border:none; background:transparent; padding:0px; font-size:14px;}")
+        self.ptz_btn.setStyleSheet("QPushButton{border:none; background:transparent; padding:0px; color:#9fb4ff; font-weight:bold;}"
+                                   "QPushButton:hover{color:#ffffff;}")
         self.ptz_btn.clicked.connect(lambda: self.ptz_requested.emit(self.cfg))
         h.addWidget(self.ptz_btn)
         self.ptz_btn.setVisible(cfg.protocol == "dvrip")
