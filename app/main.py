@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 from collections import deque
 
@@ -629,7 +630,16 @@ def main():
     app.setStyleSheet(DARK_THEME)
     win = MainWindow()
     win.show()
-    sys.exit(app.exec())
+    code = app.exec()
+    # A thread that is still winding down (an NVR read that has not timed out yet) would make Qt abort with
+    # "QThread: Destroyed while thread is still running" while Python tears the objects down: leave directly.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            if stream is not None:
+                stream.flush()
+        except Exception:  # noqa: BLE001
+            pass
+    os._exit(code)
 
 
 if __name__ == "__main__":

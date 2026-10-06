@@ -82,13 +82,22 @@ class _PlayWorker(QThread):
         self.pending = False
         self.audio_enabled = False
         self._running = True
+        self._client = None
 
-    def stop(self):
+    def stop(self, wait_ms: int = 300):
+        """Ask the worker to end and unblock whatever it waits on (connect / first data / read)."""
         self._running = False
-        self.wait(3000)
+        c = self._client
+        if c is not None:
+            try:
+                c.close()                       # a blocked read raises OSError in the worker, which ends it
+            except Exception:  # noqa: BLE001
+                pass
+        self.wait(wait_ms)
 
     def run(self):
         c = dvrip.DVRIPClient(self.cfg.host, self.cfg.port, self.cfg.username, self.cfg.password, timeout=15)
+        self._client = c
         step = "התחברות ל-NVR"
         try:
             c.connect()
@@ -577,9 +586,19 @@ class PlaybackDialog(QDialog):
         self._player.start()
 
     def _stop(self):
-        if self._player is not None:
-            self._player.stop()
-            self._player = None
+        p, self._player = self._player, None
+        if p is not None:
+            for sig in (p.frame, p.audio, p.message):
+                try:
+                    sig.disconnect()
+                except TypeError:
+                    pass
+            p.stop()
+            # Still connecting to the NVR? Dropping the last reference to a running QThread aborts the whole
+            # program ("QThread: Destroyed while thread is still running"): keep it until it has really ended.
+            _BACKGROUND[:] = [t for t in _BACKGROUND if t.isRunning()]
+            if p.isRunning():
+                _BACKGROUND.append(p)
         self._audio.stop()
 
     def _on_frame(self, img):
@@ -629,6 +648,8 @@ class PlaybackDialog(QDialog):
         if self._download is not None and self._download.isRunning():
             self._download.cancel()
             self._download.wait(3000)
+            if self._download.isRunning():
+                _BACKGROUND.append(self._download)
         self._stop()
         self._cancel_query()
         super().closeEvent(event)
