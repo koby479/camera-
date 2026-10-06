@@ -33,14 +33,13 @@ _OK_CODES = (100, 101, 102, 515)
 _RET_TEXT = {203: "שם משתמש/סיסמה שגויים", 205: "שם משתמש/סיסמה שגויים", 607: "אין הרשאה לשליטה במצלמה"}
 
 
-STOP_MODES = {
-    "all": "כל השיטות יחד (מומלץ)",   # recorders differ in what they accept as "stop": send every known form
-    "std": "סטנדרטית",          # same command with Preset 65535 (what most recorders expect)
-    "aux_off": "עם AUX כבוי",   # as above, and the AUX flag switched off
-    "step0": "מהירות 0",        # a new "move" with speed 0
+# Which Preset value means "start moving" and which means "stop". Recorders differ. The log of the Provision XVR
+# showed: a command with Preset -1 never moved the camera, while every command with Preset 65535 made it run to the
+# end of its range - so on this recorder 65535 = start and -1 = stop (the opposite of the usual convention).
+ENCODINGS = {
+    "inv": ("התחלה 65535 / עצירה -1  (נראה שזה הנכון לדגם הזה)", 65535, -1),
+    "std": ("התחלה -1 / עצירה 65535  (התקן הרגיל)", -1, 65535),
 }
-ALL_STOPS = (("std", 65535, None, "On"), ("aux_off", 65535, None, "Off"),
-             ("step0", -1, 0, "On"), ("std0", 65535, 0, "On"))   # (name, Preset, Step or None = as given, AUX)
 
 
 def _params(channel: int, step: int, preset: int, cmd: str, aux: str = "On") -> dict:
@@ -70,22 +69,26 @@ class PtzController:
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
         self._want_ok = False
-        self.stop_mode = "all"
+        self.encoding = "inv"
 
     # ---- public (non-blocking) --------------------------------------------------
     def send(self, channel: int, command: str, step: int = 5, preset: int = -1, aux: str = "On"):
         self._q.put((channel, command, int(step), int(preset), aux))
         self._ensure_thread()
 
+    def _presets(self) -> tuple[int, int]:
+        _label, start, stop = ENCODINGS[self.encoding]
+        return start, stop
+
     def move(self, channel: int, name: str, speed: int = 5):
         """Start moving / zooming / focusing; call stop() with the same name when the button is released."""
         cmd = DIRECTIONS.get(name) or LENS.get(name)
         if cmd:
-            self.send(channel, cmd, speed, -1)
+            self.send(channel, cmd, speed, self._presets()[0])
 
     def stop(self, channel: int, name: str, speed: int = 5):
-        """End a movement. A stop that the recorder or camera misses leaves the camera running to the end of its
-        range, so it is sent three times (now, +0.15 s, +0.4 s); repeating a stop is harmless."""
+        """End a movement. A stop that gets lost leaves the camera running to the end of its range, so it is sent
+        three times (now, +0.15 s, +0.4 s); repeating a stop is harmless."""
         cmd = DIRECTIONS.get(name) or LENS.get(name)
         if not cmd:
             return
@@ -96,23 +99,15 @@ class PtzController:
             t.start()
 
     def stop_all(self, channel: int):
-        """Emergency stop: every stop form for every direction and lens movement."""
+        """Emergency stop: a stop for every direction and lens movement."""
         for cmd in list(DIRECTIONS.values()) + list(LENS.values()):
-            self._send_stop(channel, cmd, 4, force_all=True)
+            self._send_stop(channel, cmd, 4)
 
-    def _send_stop(self, channel: int, cmd: str, speed: int, force_all: bool = False):
-        mode = "all" if force_all else self.stop_mode
-        if mode == "all":
-            for _name, preset, step, aux in ALL_STOPS:
-                self.send(channel, cmd, speed if step is None else step, preset, aux=aux)
-        elif mode == "step0":
-            self.send(channel, cmd, 0, -1)
-        else:
-            self.send(channel, cmd, speed, 65535, aux="Off" if mode == "aux_off" else "On")
+    def _send_stop(self, channel: int, cmd: str, speed: int):
+        self.send(channel, cmd, speed, self._presets()[1])
 
     def warm_up(self):
-        """Open the connection now, so the first click is not delayed by connecting (a start and a stop that wait
-        together reach the recorder at the same instant and the stop can be lost)."""
+        """Open the connection now, so the first click is not delayed by connecting."""
         self._q.put(None)
         self._ensure_thread()
 
@@ -186,7 +181,7 @@ class PtzController:
 
     def _deliver(self, channel: int, cmd: str, step: int, preset: int, aux: str = "On"):
         c = self._client
-        print(f"[ptz] -> {cmd} step={step} preset={preset} aux={aux}", file=sys.stderr)
+        print(f"[ptz] {time.strftime('%H:%M:%S')}.{int(time.time() * 1000) % 1000:03d} -> {cmd} step={step} preset={preset} ({'START' if preset == self._presets()[0] else 'STOP' if preset == self._presets()[1] else 'preset'}, {self.encoding})", file=sys.stderr)
         # a command that is not a plain movement (preset, tour) gets its answer reported as success too
         self._want_ok = preset not in (-1, 65535)
         c._send(c.sock, MSG_PTZ, {"Name": "OPPTZControl", "SessionID": c._sid(),
@@ -212,12 +207,11 @@ class PtzController:
                     pass
             data = dvrip._parse_json(payload)
             if _mid != 1007:                                   # not a keepalive answer
-                print(f"[ptz] <- msg {_mid}: {payload[:160]!r}", file=sys.stderr)
-            if data.get("Name") == "OPPTZControl" or "OPPTZControl" in data:
+                print(f"[ptz] {time.strftime('%H:%M:%S')}.{int(time.time() * 1000) % 1000:03d} <- msg {_mid}: {payload[:160]!r}", file=sys.stderr)
+            if _mid == 1401 or data.get("Name") == "OPPTZControl" or "OPPTZControl" in data:
                 self._handle_ret(data.get("Ret"))
 
     def _handle_ret(self, ret):
-        print(f"[ptz] <- Ret={ret}", file=sys.stderr)
         ok = ret in _OK_CODES or ret is None
         if ok:
             if self._want_ok:

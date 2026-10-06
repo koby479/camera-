@@ -6,7 +6,7 @@ from __future__ import annotations
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (QComboBox, QGridLayout, QHBoxLayout, QLabel, QPushButton, QSlider, QSpinBox, QVBoxLayout, QWidget)
 
-from app.core.ptz import STOP_MODES, PtzController
+from app.core.ptz import ENCODINGS, PtzController
 
 HOLD_AFTER_MS = 180      # pressed longer than this = continuous movement; shorter = a small nudge
 NUDGE_MS = 150           # how long a nudge moves the camera (at the lowest speed)
@@ -82,15 +82,16 @@ class PtzPanel(QWidget):
         presets.addWidget(go)
         presets.addWidget(save)
 
-        self.stop_mode = QComboBox()
-        for key, label in STOP_MODES.items():
-            self.stop_mode.addItem(label, key)
-        self.stop_mode.setToolTip("אם המצלמה לא נעצרת אחרי לחיצה, נסה שיטת עצירה אחרת")
-        self.stop_mode.currentIndexChanged.connect(
-            lambda _i: setattr(self.ctl, "stop_mode", self.stop_mode.currentData()))
-        mode_row = QHBoxLayout()
-        mode_row.addWidget(QLabel("שיטת עצירה:"))
-        mode_row.addWidget(self.stop_mode, 1)
+        self.encoding = QComboBox()
+        for key, (label, _start, _stop) in ENCODINGS.items():
+            self.encoding.addItem(label, key)
+        self.encoding.setToolTip("אם המצלמה לא נעצרת או לא זזה בכלל, נסה את הקידוד השני")
+        self.encoding.currentIndexChanged.connect(
+            lambda _i: setattr(self.ctl, "encoding", self.encoding.currentData()))
+        self.ctl.encoding = self.encoding.currentData()
+        mode_row = QVBoxLayout()
+        mode_row.addWidget(QLabel("קידוד פקודות:"))
+        mode_row.addWidget(self.encoding)
 
         self.status = QLabel("לחיצה קצרה = הזזה קטנה, החזקה = תנועה רצופה")
         self.status.setWordWrap(True)
