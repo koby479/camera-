@@ -56,7 +56,7 @@ class _QueryWorker(QThread):
             c.login()
             step = f"חיפוש הקלטות בערוץ {self.channel + 1}"
             files, bad = recsearch.run_search(
-                c, self.channel, self.days, recsearch.plans_for(self.mode),
+                c, self.channel, self.days, recsearch.smart_plans(self.cfg.host),
                 on_files=self.partial.emit, log=self._log, status=self.progress_text.emit,
                 cancelled=lambda: self._cancel)
             self.done.emit(files, bad)
@@ -247,18 +247,14 @@ class PlaybackDialog(QDialog):
         search_btn = QPushButton("🔍 חפש הקלטות")
         search_btn.clicked.connect(self._search)
 
-        self.mode_combo = QComboBox()
-        for key, label in recsearch.MODES:
-            self.mode_combo.addItem(label, key)
-        self.mode_combo.setToolTip("אם שיטה אחת לא מוצאת הקלטות, נסה שיטה אחרת. 'אוטומטי' מנסה את כולן")
+        self.multi_day = QCheckBox("חפש כמה ימים אחורה")
         self.days_spin = QSpinBox()
-        self.days_spin.setRange(1, 365)
-        self.days_spin.setValue(14)
-        self.days_spin.setSuffix(" ימים אחורה")
-        self.days_spin.setToolTip("בחיפוש רחב: כמה ימים לסרוק, מהתאריך שנבחר אחורה")
+        self.days_spin.setRange(2, 365)
+        self.days_spin.setValue(7)
+        self.days_spin.setSuffix(" ימים")
+        self.days_spin.setToolTip("כמה ימים לסרוק, מהתאריך שנבחר אחורה")
         self.days_spin.setEnabled(False)
-        self.mode_combo.currentIndexChanged.connect(
-            lambda _i: self.days_spin.setEnabled(self.mode_combo.currentData() == "wide"))
+        self.multi_day.toggled.connect(self.days_spin.setEnabled)
 
         self.top_bar = QWidget()
         top_col = QVBoxLayout(self.top_bar)
@@ -270,9 +266,9 @@ class PlaybackDialog(QDialog):
         top.addWidget(self.date_edit)
         top.addWidget(search_btn)
         top2 = QHBoxLayout()
-        top2.addWidget(QLabel("שיטת חיפוש:"))
-        top2.addWidget(self.mode_combo, 1)
+        top2.addWidget(self.multi_day)
         top2.addWidget(self.days_spin)
+        top2.addStretch(1)
         top_col.addLayout(top)
         top_col.addLayout(top2)
         self._found: dict = {}
@@ -390,13 +386,12 @@ class PlaybackDialog(QDialog):
         self._found = {}
         self._log = []
         self.files.clear()
-        mode = self.mode_combo.currentData()
+        mode = "auto"                                   # one smart search: no method to choose
         first = self.date_edit.date()
-        n = self.days_spin.value() if mode == "wide" else 1
+        n = self.days_spin.value() if self.multi_day.isChecked() else 1
         days = [first.addDays(-i).toString("yyyy-MM-dd") for i in range(n)]
         ch = self.channel_combo.currentData()
-        label = self.mode_combo.currentText()
-        self._log.append(f"{datetime.now():%Y-%m-%d %H:%M:%S} ערוץ {ch + 1}, שיטה: {label}, ימים: {days[-1]}..{days[0]}")
+        self._log.append(f"{datetime.now():%Y-%m-%d %H:%M:%S} ערוץ {ch + 1}, ימים: {days[-1]}..{days[0]}")
         self.status.setText("מחפש הקלטות...")
         q = _QueryWorker(self.cfg, ch, days, mode)
         q.partial.connect(self._on_partial)
@@ -451,7 +446,7 @@ class PlaybackDialog(QDialog):
         if files:
             text = f"נמצאו {len(files)} הקלטות"
         else:
-            text = ("לא נמצאו הקלטות. נסה שיטת חיפוש אחרת, או 'חיפוש רחב' לסריקת כמה ימים. "
+            text = ("לא נמצאו הקלטות. נסה תאריך אחר, או סמן 'חפש כמה ימים אחורה'. "
                     "אחרי חיפוש אפשר ללחוץ 'העתק יומן' ולשלוח לי")
         if failed:
             text += f". ה-NVR לא ענה עבור {len(failed)} חלונות זמן (חלקי, אפשר לחפש שוב)"

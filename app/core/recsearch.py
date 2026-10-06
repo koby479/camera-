@@ -41,6 +41,21 @@ MODES: list[tuple[str, str]] = [
 ]
 
 
+# What worked on a recorder during this session: host -> variant name. The next search tries it first.
+LEARNED: dict[str, str] = {}
+
+
+def smart_plans(host: str | None = None) -> list[Plan]:
+    """The one search the program runs. The common case costs a single quick pass (the parameter set that worked
+    before on this recorder, else the standard one, in 2-hour windows); every further step runs only if the
+    day is still empty: the other parameter sets in 6-hour windows, then one whole-day query."""
+    first = LEARNED.get(host or "", "standard")
+    others = [v for v in ALL_VARIANTS if v != first]
+    return [Plan([first], 120, 10),
+            Plan(others, 360, 8, only_if_empty=True),
+            Plan(["standard"], 1440, 30, only_if_empty=True)]
+
+
 def plans_for(mode: str) -> list[Plan]:
     if mode == "std2h":
         return [Plan(["standard"], 120, 10)]
@@ -52,8 +67,7 @@ def plans_for(mode: str) -> list[Plan]:
         return [Plan(ALT_VARIANTS, 60, 8)]
     if mode == "wide":
         return [Plan(ALL_VARIANTS, 120, 8)]
-    # auto: every parameter set in 2-hour windows; if still nothing, one big query as a last resort
-    return [Plan(ALL_VARIANTS, 120, 8), Plan(["standard"], 1440, 30, only_if_empty=True)]
+    return smart_plans()
 
 
 def _reconnect(client) -> bool:
@@ -137,6 +151,9 @@ def run_search(client, channel: int, days: list[str], plans: list[Plan], on_file
                 answered = True
                 failed_windows += [f"{day} {w}" for w in bad]
                 day_files += len(part)
+                host = getattr(client, "host", None)
+                if part and host and vname != "standard":
+                    LEARNED[host] = vname          # next time this recorder is asked this way first
                 log(f"{day} [{vname}] סיכום: {len(part)} קבצים ({counted['new']} חדשים)")
 
     if not answered and not found and last_error and not cancelled():

@@ -85,12 +85,12 @@ class PtzPanel(QWidget):
         self.encoding = QComboBox()
         for key, (label, _start, _stop) in ENCODINGS.items():
             self.encoding.addItem(label, key)
-        self.encoding.setToolTip("אם המצלמה לא נעצרת או לא זזה בכלל, נסה את הקידוד השני")
+        self.encoding.setToolTip("אם המצלמה לא נעצרת או לא זזה בכלל, נסה את השיטה השנייה")
         self.encoding.currentIndexChanged.connect(
             lambda _i: setattr(self.ctl, "encoding", self.encoding.currentData()))
         self.ctl.encoding = self.encoding.currentData()
         mode_row = QVBoxLayout()
-        mode_row.addWidget(QLabel("קידוד פקודות:"))
+        mode_row.addWidget(QLabel("שיטת שליטה:"))
         mode_row.addWidget(self.encoding)
 
         self.status = QLabel("לחיצה קצרה = הזזה קטנה, החזקה = תנועה רצופה")

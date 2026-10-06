@@ -37,8 +37,8 @@ _RET_TEXT = {203: "שם משתמש/סיסמה שגויים", 205: "שם משתמ
 # showed: a command with Preset -1 never moved the camera, while every command with Preset 65535 made it run to the
 # end of its range - so on this recorder 65535 = start and -1 = stop (the opposite of the usual convention).
 ENCODINGS = {
-    "inv": ("התחלה 65535 / עצירה -1  (נראה שזה הנכון לדגם הזה)", 65535, -1),
-    "std": ("התחלה -1 / עצירה 65535  (התקן הרגיל)", -1, 65535),
+    "inv": ("שיטה א׳: התחלה 65535 / עצירה -1", 65535, -1),
+    "std": ("שיטה ב׳: התחלה -1 / עצירה 65535", -1, 65535),
 }
 
 

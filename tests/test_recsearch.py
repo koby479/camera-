@@ -116,6 +116,20 @@ class RecSearchTests(unittest.TestCase):
         search(Nvr({"standard": "files"}), "std2h", log=lines.append)
         self.assertTrue(any("[standard]" in l for l in lines))
 
+    def test_smart_search_starts_with_what_worked_before(self):
+        recsearch.LEARNED.clear()
+        self.assertEqual(recsearch.smart_plans("1.2.3.4")[0].variants, ["standard"])
+        recsearch.LEARNED["1.2.3.4"] = "type_any"
+        plans = recsearch.smart_plans("1.2.3.4")
+        self.assertEqual(plans[0].variants, ["type_any"])
+        self.assertNotIn("type_any", plans[1].variants)
+        recsearch.LEARNED.clear()
+
+    def test_smart_search_costs_one_pass_when_the_day_has_recordings(self):
+        nvr = Nvr({"standard": "files"})
+        search(nvr, "auto")
+        self.assertEqual(len(nvr.calls), 12)                 # only the 12 two-hour windows, nothing else
+
     def test_modes_all_have_plans(self):
         for key, _label in recsearch.MODES:
             self.assertTrue(recsearch.plans_for(key))
