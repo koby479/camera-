@@ -32,6 +32,7 @@ class VideoTile(QWidget):
     audio_toggled = pyqtSignal(str, bool)      # camera_id, wants_audio
     activated = pyqtSignal(str)                # double-click: enlarge / restore
     hd_toggled = pyqtSignal(str, bool)         # camera_id, wants main stream
+    ptz_requested = pyqtSignal(object)         # CameraConfig: open the camera-control window
     playback_requested = pyqtSignal(object)    # CameraConfig (right-click menu)
     close_requested = pyqtSignal(str)          # camera_id
     reconnect_requested = pyqtSignal(str, object)       # camera_id, None = same stream / True = main / False = sub
@@ -91,6 +92,13 @@ class VideoTile(QWidget):
         self.hd_btn.setStyleSheet("QPushButton{border:none; background:transparent; color:#8a8f9a; font-weight:bold;}"
                                   "QPushButton:checked{color:#2ecc71;}")
         self.hd_btn.toggled.connect(lambda on: self.hd_toggled.emit(self.cfg.id, on))
+        self.ptz_btn = QPushButton("🎛")
+        self.ptz_btn.setFixedSize(28, 22)
+        self.ptz_btn.setToolTip("שליטה במצלמה: הזזה, זום, פוקוס (למצלמות שתומכות)")
+        self.ptz_btn.setStyleSheet("QPushButton{border:none; background:transparent; font-size:14px;}")
+        self.ptz_btn.clicked.connect(lambda: self.ptz_requested.emit(self.cfg))
+        h.addWidget(self.ptz_btn)
+        self.ptz_btn.setVisible(cfg.protocol == "dvrip")
         h.addWidget(self.hd_btn)
         self.hd_btn.setVisible(cfg.protocol == "dvrip")
         h.addWidget(self.audio_btn)

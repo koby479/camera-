@@ -21,6 +21,8 @@ from app.ui.nvr_probe_worker import NvrProbeWorker
 from app.core.audio import AudioPlayer
 from app.core import decoders, names, settings
 from app.ui.playback_dialog import PlaybackDialog
+from app.ui.event_log import AlarmHub, EventLogDock
+from app.ui.ptz_panel import PtzPanel
 
 
 class MainWindow(QMainWindow):
@@ -72,6 +74,12 @@ class MainWindow(QMainWindow):
         self.sidebar.disconnect_all_requested.connect(self._close_all_tiles)
 
         self._build_decoder_menu()
+        self._ptz_panels: dict[str, PtzPanel] = {}
+        self.alarm_hub = AlarmHub(self)
+        self.event_dock = EventLogDock(self.alarm_hub, self)
+        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.event_dock)
+        self.event_dock.setMaximumHeight(220)
+        self.menuBar().addAction(self.event_dock.toggleViewAction())
 
         for nvr in self.nvrs:
             item = self.sidebar.add_nvr_node(nvr)
@@ -272,6 +280,7 @@ class MainWindow(QMainWindow):
         tile.audio_toggled.connect(self._on_audio_toggled)
         tile.activated.connect(self._on_tile_activated)
         tile.hd_toggled.connect(self._on_hd_toggled)
+        tile.ptz_requested.connect(self._open_ptz)
         tile.playback_requested.connect(self._on_tile_playback)
         tile.close_requested.connect(self._close_tile)
         tile.close_all_requested.connect(self._close_all_tiles)
@@ -285,6 +294,8 @@ class MainWindow(QMainWindow):
 
     def _start_worker(self, cfg: CameraConfig, tile: VideoTile, main: bool = False):
         worker = CameraWorker(cfg)
+        if cfg.protocol == "dvrip":                # live events (motion, alarms) of this recorder, one listener each
+            self.alarm_hub.ensure(cfg)
         worker.frame_ready.connect(self._on_frame)
         worker.status_changed.connect(self._on_status)
         worker.path_resolved.connect(self._on_path_resolved)
@@ -522,6 +533,14 @@ class MainWindow(QMainWindow):
         self._leave_fullscreen()
         self.on_playback(cfg, "nvr_channel" if cfg.parent_nvr_id else "single")
 
+    def _open_ptz(self, cfg: CameraConfig):
+        panel = self._ptz_panels.get(cfg.id)
+        if panel is None:
+            panel = self._ptz_panels[cfg.id] = PtzPanel(cfg, self)
+        panel.show()
+        panel.raise_()
+        panel.activateWindow()
+
     def _on_hd_toggled(self, camera_id: str, on: bool):
         w = self.workers.get(camera_id)
         if w and w.cfg.protocol == "dvrip":
@@ -605,6 +624,9 @@ class MainWindow(QMainWindow):
         for worker in workers:
             worker.wait(2000)
         self.audio_player.stop()
+        for panel in self._ptz_panels.values():
+            panel.close()                      # sends "stop" so no camera keeps moving
+        self.alarm_hub.stop()
         save_all(self.nvrs, self.singles)
         super().closeEvent(event)
 
