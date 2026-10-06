@@ -34,6 +34,7 @@ CHOICES = (("auto", "אוטומטי (הראשון שעובד)"),
 LABELS = {"pyav": "PyAV", "ffmpeg": "ffmpeg.exe חיצוני", "opencv": "OpenCV"}
 
 DEFAULT_CAP = 1280          # the external ffmpeg never delivers wider than this (the pipe carries raw RGB); narrower streams stay as they are
+OPENCV_QUEUE_MAX = 24      # OpenCV pictures are already shrunk, but keep this short anyway
 QUEUE_MAX = 60              # decoded pictures waiting to be picked up; the oldest are dropped beyond this
 
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -289,9 +290,13 @@ class OpenCVBackend:
     def __init__(self, codec: str, max_width=None):
         import cv2
         self._cv2 = cv2
-        self._frames: collections.deque = collections.deque(maxlen=QUEUE_MAX)
+        # OpenCV hands over FULL-size BGR pictures (a 4K one is 25 MB). They are shrunk right in the reader
+        # thread and the queue is short, otherwise a few channels exhaust the RAM (cv2.error -4 Insufficient memory).
+        self._cap_w = max(DEFAULT_CAP, int(max_width or 0))
+        self._frames: collections.deque = collections.deque(maxlen=OPENCV_QUEUE_MAX)
         self._closed = False
         self._failed = False
+        self._error: str | None = None
         self._cap = None
         self._srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._srv.bind(("127.0.0.1", 0))
@@ -324,12 +329,24 @@ class OpenCVBackend:
             if not self._closed:
                 print("[decoder:opencv] OpenCV could not open the stream", file=sys.stderr)
             return
-        while not self._closed:
-            ok, img = cap.read()
-            if not ok or img is None:
-                break
-            self._frames.append(NpFrame(img[:, :, ::-1]))
-        cap.release()
+        try:
+            while not self._closed:
+                ok, img = cap.read()
+                if not ok or img is None:
+                    break
+                h, w = img.shape[:2]
+                if w > self._cap_w:                     # shrink first: the big picture is freed right after
+                    img = cv2.resize(img, (self._cap_w, max(2, int(round(h * self._cap_w / w / 2)) * 2)),
+                                     interpolation=cv2.INTER_AREA)
+                self._frames.append(NpFrame(cv2.cvtColor(img, cv2.COLOR_BGR2RGB)))
+        except BaseException as exc:  # noqa: BLE001 - cv2.error, SystemError, MemoryError: must not die silently
+            self._error = f"{type(exc).__name__}: {str(exc).strip()[:120]}"
+            print(f"[decoder:opencv] reader stopped ({self._error})", file=sys.stderr)
+        finally:
+            try:
+                cap.release()
+            except Exception:  # noqa: BLE001
+                pass
 
     def _drain(self):
         while True:
@@ -339,14 +356,18 @@ class OpenCVBackend:
                 return
 
     def feed(self, data: bytes):
-        if self._failed or self._closed:
+        if self._closed:
+            return
+        if self._error:                                 # the reader thread died: end the stream -> it reconnects cleanly
+            raise OSError(f"OpenCV decoder stopped ({self._error})")
+        if self._failed:
             return
         try:
             self._conn.sendall(data)
         except OSError as exc:
             self._failed = True
             print(f"[decoder:opencv] connection to OpenCV ended ({exc})", file=sys.stderr)
-            return
+            raise OSError(f"OpenCV connection ended ({exc})") from exc
         yield from self._drain()
 
     def finish(self):
