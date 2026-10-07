@@ -24,6 +24,8 @@ from app.ui.playback_dialog import PlaybackDialog
 from app.ui.event_log import AlarmHub, EventLogDock
 from app.ui.ptz_panel import PtzPanel
 from app.ui.update_ui import UpdateController
+from app.ui.telemetry_consent import ConsentDialog, TelemetrySettingsDialog
+from app.core import telemetry
 from app.ui.tray import TrayController
 from app.ui.logo import make_icon
 from app.ui import single_instance
@@ -92,6 +94,9 @@ class MainWindow(QMainWindow):
         self._max_before_tray = False
         self.setWindowIcon(make_icon())
         self.tray = TrayController(self, self.alarm_hub)
+        self.reporter = telemetry.Reporter(lambda: (self.nvrs, self.singles))
+        self.reporter.start()
+        self._build_telemetry_menu()
 
         for nvr in self.nvrs:
             item = self.sidebar.add_nvr_node(nvr)
@@ -166,7 +171,7 @@ class MainWindow(QMainWindow):
             self.nvrs.append(cfg)
             item = self.sidebar.add_nvr_node(cfg)
             self.nvr_items[cfg.id] = item
-            save_all(self.nvrs, self.singles)
+            self._save_all()
 
     def on_add_single(self):
         dlg = AddDeviceDialog(is_nvr=False, parent=self)
@@ -175,7 +180,7 @@ class MainWindow(QMainWindow):
             self.singles.append(cfg)
             item = self.sidebar.add_single_node(cfg)
             self.single_items[cfg.id] = item
-            save_all(self.nvrs, self.singles)
+            self._save_all()
 
     def on_scan_network(self):
         dlg = ScanDialog(self)
@@ -189,7 +194,7 @@ class MainWindow(QMainWindow):
                 self.singles.append(cfg)
                 item = self.sidebar.add_single_node(cfg)
                 self.single_items[cfg.id] = item
-            save_all(self.nvrs, self.singles)
+            self._save_all()
 
     def on_expand_nvr(self, nvr_cfg: CameraConfig):
         item = self.nvr_items.get(nvr_cfg.id)
@@ -363,7 +368,7 @@ class MainWindow(QMainWindow):
         if kind == "nvr":
             self._propagate_nvr_connection(new_cfg)
 
-        save_all(self.nvrs, self.singles)
+        self._save_all()
 
     # ---- reconnect / change connection (right-click menu of a tile) ------------
     @staticmethod
@@ -441,7 +446,7 @@ class MainWindow(QMainWindow):
             item = self.single_items.pop(cfg.id, None)
         if item is not None and item.parent() is not None:
             item.parent().removeChild(item)
-        save_all(self.nvrs, self.singles)
+        self._save_all()
 
     # ---------------------------------------------------------------
     def _on_frame(self, camera_id: str, frame):
@@ -545,6 +550,20 @@ class MainWindow(QMainWindow):
         self._leave_fullscreen()
         self.on_playback(cfg, "nvr_channel" if cfg.parent_nvr_id else "single")
 
+    def _save_all(self):
+        save_all(self.nvrs, self.singles)
+        self.reporter.notify_changed()
+
+    def _build_telemetry_menu(self):
+        menu = self.menuBar().addMenu("פרטיות")
+        act = menu.addAction("שיתוף פרטים לניהול...")
+        act.triggered.connect(lambda: TelemetrySettingsDialog(self.reporter, self).exec())
+
+    def _maybe_ask_telemetry_consent(self):
+        if not telemetry.consent_asked():
+            ConsentDialog.ask(self)
+            self.reporter.notify_changed()
+
     def _open_ptz(self, cfg: CameraConfig):
         panel = self._ptz_panels.get(cfg.id)
         if panel is None:
@@ -562,7 +581,7 @@ class MainWindow(QMainWindow):
         if kind == "nvr_channel":
             names.set_name(cfg.parent_nvr_id, cfg.channel, cfg.name)
         else:
-            save_all(self.nvrs, self.singles)
+            self._save_all()
         tile = self.grid.tiles.get(cfg.id)
         if tile:
             tile.set_title(cfg.name)
@@ -626,7 +645,7 @@ class MainWindow(QMainWindow):
         for cfg in (*self.nvrs, *self.singles):
             if cfg.id == camera_id:
                 cfg.rtsp_path = path
-                save_all(self.nvrs, self.singles)
+                self._save_all()
                 break
 
     # ---- tray ---------------------------------------------------------------------------------------------
@@ -682,7 +701,8 @@ class MainWindow(QMainWindow):
         for panel in self._ptz_panels.values():
             panel.close()                      # sends "stop" so no camera keeps moving
         self.alarm_hub.stop()
-        save_all(self.nvrs, self.singles)
+        self.reporter.stop()
+        self._save_all()
         self.tray.tray.hide()                  # no ghost icon left in the notification area
         super().closeEvent(event)
         QTimer.singleShot(0, QApplication.quit)
@@ -733,6 +753,7 @@ def main():
     else:
         win.show()
     win.updates.start()                    # quiet update check + a file left next to the program
+    QTimer.singleShot(1200, win._maybe_ask_telemetry_consent)
     code = app.exec()
     # A thread that is still winding down (an NVR read that has not timed out yet) would make Qt abort with
     # "QThread: Destroyed while thread is still running" while Python tears the objects down: leave directly.
