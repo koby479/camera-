@@ -39,11 +39,11 @@ jobs:
 
       - name: Build EXE with PyInstaller (normal, windowed)
         run: |
-          pyinstaller --noconfirm --onefile --windowed --name "UniversalCamViewer" --collect-all numpy --collect-all cv2 --collect-all onvif --collect-all av --collect-all zeep --collect-all wsdiscovery --add-data "${{ steps.onvif_wsdl.outputs.path }};onvif\wsdl" --add-data "app;app" app/main.py
+          pyinstaller --noconfirm --onefile --windowed --icon "app/assets/logo.ico" --name "UniversalCamViewer" --collect-all numpy --collect-all cv2 --collect-all onvif --collect-all av --collect-all zeep --collect-all wsdiscovery --add-data "${{ steps.onvif_wsdl.outputs.path }};onvif\wsdl" --add-data "app;app" app/main.py
 
       - name: Build DEBUG EXE with PyInstaller (console, shows errors)
         run: |
-          pyinstaller --noconfirm --onefile --console --name "UniversalCamViewer-DEBUG" --collect-all numpy --collect-all cv2 --collect-all onvif --collect-all av --collect-all zeep --collect-all wsdiscovery --add-data "${{ steps.onvif_wsdl.outputs.path }};onvif\wsdl" --add-data "app;app" app/main.py
+          pyinstaller --noconfirm --onefile --console --icon "app/assets/logo.ico" --name "UniversalCamViewer-DEBUG" --collect-all numpy --collect-all cv2 --collect-all onvif --collect-all av --collect-all zeep --collect-all wsdiscovery --add-data "${{ steps.onvif_wsdl.outputs.path }};onvif\wsdl" --add-data "app;app" app/main.py
 
       - name: SHA-256 of the EXE (the program checks its update against it)
         run: |

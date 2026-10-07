@@ -7,7 +7,7 @@ from collections import deque
 from PyQt6.QtWidgets import (
     QApplication, QFileDialog, QMainWindow, QSplitter, QMessageBox
 )
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import QEvent, Qt, QTimer
 from PyQt6.QtGui import QAction, QActionGroup, QKeyEvent, QKeySequence, QShortcut
 
 from app.core.camera import CameraConfig, CameraWorker, CameraStatus, NO_SUB
@@ -24,6 +24,9 @@ from app.ui.playback_dialog import PlaybackDialog
 from app.ui.event_log import AlarmHub, EventLogDock
 from app.ui.ptz_panel import PtzPanel
 from app.ui.update_ui import UpdateController
+from app.ui.tray import TrayController
+from app.ui.logo import make_icon
+from app.ui import single_instance
 
 
 class MainWindow(QMainWindow):
@@ -84,6 +87,11 @@ class MainWindow(QMainWindow):
         self.menuBar().addAction(self.event_dock.toggleViewAction())
         self.updates = UpdateController(self)
         self.updates.build_menu(self.menuBar())
+        self._in_tray = False                  # hidden in the notification area: video is not drawn
+        self._quitting = False                 # a real exit (the X button may only hide to the tray)
+        self._max_before_tray = False
+        self.setWindowIcon(make_icon())
+        self.tray = TrayController(self, self.alarm_hub)
 
         for nvr in self.nvrs:
             item = self.sidebar.add_nvr_node(nvr)
@@ -438,7 +446,7 @@ class MainWindow(QMainWindow):
     # ---------------------------------------------------------------
     def _on_frame(self, camera_id: str, frame):
         tile = self.grid.tiles.get(camera_id)
-        if tile:
+        if tile and not self._in_tray:         # nobody sees the picture while the window sits in the tray
             tile.update_frame(frame)
         w = self.workers.get(camera_id)
         if w:
@@ -621,7 +629,50 @@ class MainWindow(QMainWindow):
                 save_all(self.nvrs, self.singles)
                 break
 
+    # ---- tray ---------------------------------------------------------------------------------------------
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        tray = getattr(self, "tray", None)
+        if (tray is not None and event.type() == QEvent.Type.WindowStateChange and self.isMinimized()
+                and tray.available and tray.minimize_to_tray() and not self._quitting):
+            QTimer.singleShot(0, self.hide_to_tray)        # minimise = move to the notification area
+
+    def hide_to_tray(self, hint: bool = True):
+        if not self.tray.available:
+            self.showMinimized()
+            return
+        if not self.isMinimized():
+            self._max_before_tray = self.isMaximized()
+        self._in_tray = True
+        self.hide()
+        if hint and not settings.get("tray_hint_shown"):
+            settings.put("tray_hint_shown", True)
+            self.tray.show_message("צופה מצלמות אוניברסלי",
+                                   "התוכנה ממשיכה לרוץ ברקע. קליק על האייקון פותח אותה, וקליק ימני מציג תפריט.")
+
+    def restore_from_tray(self):
+        self._in_tray = False
+        if self.isMinimized():
+            self.setWindowState(self.windowState() & ~Qt.WindowState.WindowMinimized)
+        if self._grid_full:
+            self.showFullScreen()
+        elif self._max_before_tray:
+            self.showMaximized()
+        else:
+            self.showNormal()
+        self.raise_()
+        self.activateWindow()
+        self.tray.on_window_shown()
+
+    def quit_app(self):
+        self._quitting = True
+        self.close()
+
     def closeEvent(self, event):
+        if not self._quitting and self.tray.available and self.tray.close_to_tray():
+            event.ignore()
+            self.hide_to_tray()
+            return
         workers = list(self.workers.values()) + self._stopping
         for worker in workers:                 # signal everyone first, then wait: closing 16 cameras was 16 x 2 s
             worker.request_stop()
@@ -632,7 +683,9 @@ class MainWindow(QMainWindow):
             panel.close()                      # sends "stop" so no camera keeps moving
         self.alarm_hub.stop()
         save_all(self.nvrs, self.singles)
+        self.tray.tray.hide()                  # no ghost icon left in the notification area
         super().closeEvent(event)
+        QTimer.singleShot(0, QApplication.quit)
 
 
 def _log_uncaught(exc_type, exc, tb):
@@ -664,10 +717,21 @@ def main():
     print(f"[app] Universal Cam Viewer {__version__} started (python {sys.version.split()[0]}, "
           f"frozen={getattr(sys, 'frozen', False)})", file=sys.stderr)
     app = QApplication(sys.argv)
+    app.setQuitOnLastWindowClosed(False)   # the tray keeps the program alive while the window is hidden
+    app.setWindowIcon(make_icon())
     from app.ui.theme import DARK_THEME
     app.setStyleSheet(DARK_THEME)
+    if "--restarted" in sys.argv:          # started by an update: the old copy is still closing
+        single_instance.wait_until_gone()
+    elif single_instance.is_running(ask_to_show=True):
+        os._exit(0)                        # already running: it was asked to show its window
+    listener = single_instance.Listener(app)
     win = MainWindow()
-    win.show()
+    listener.show_requested.connect(win.restore_from_tray)
+    if "--minimized" in sys.argv and win.tray.available:
+        win.hide_to_tray(hint=False)       # started with Windows: wait in the tray
+    else:
+        win.show()
     win.updates.start()                    # quiet update check + a file left next to the program
     code = app.exec()
     # A thread that is still winding down (an NVR read that has not timed out yet) would make Qt abort with

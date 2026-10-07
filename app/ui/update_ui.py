@@ -13,7 +13,7 @@ from pathlib import Path
 
 from PyQt6.QtCore import QObject, Qt, QThread, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import QAction, QDesktopServices
-from PyQt6.QtWidgets import QApplication, QFileDialog, QMessageBox, QProgressDialog
+from PyQt6.QtWidgets import QFileDialog, QMessageBox, QProgressDialog
 
 from app import BUILD, VERSION, __version__
 from app.core import settings, updater
@@ -327,5 +327,4 @@ class UpdateController(QObject):
     def _restart(self):
         QMessageBox.information(self.win, "עדכון", "העדכון הותקן. התוכנה נסגרת ותיפתח שוב בעוד כמה שניות.")
         updater.relaunch_later()
-        self.win.close()
-        QApplication.quit()
+        self.win.quit_app()

@@ -263,7 +263,7 @@ def _clean_env() -> dict:
 
 def relaunch_args(exe: Path, delay: int = 3) -> list[str]:
     """Wait a few seconds (this process is closing), then start the program again."""
-    return ["cmd.exe", "/c", "ping", "-n", str(delay + 1), "127.0.0.1", ">nul", "&", "start", "", str(exe)]
+    return ["cmd.exe", "/c", "ping", "-n", str(delay + 1), "127.0.0.1", ">nul", "&", "start", "", str(exe), "--restarted"]
 
 
 def relaunch_later(exe: Path | None = None, delay: int = 3) -> None:

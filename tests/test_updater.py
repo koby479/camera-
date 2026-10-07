@@ -175,7 +175,7 @@ class UpdaterTests(unittest.TestCase):
         args = updater.relaunch_args(Path(r"C:\Program Files\Cam\UniversalCamViewer.exe"), 3)
         self.assertEqual(args[:3], ["cmd.exe", "/c", "ping"])
         self.assertIn("start", args)
-        self.assertEqual(args[-1], r"C:\Program Files\Cam\UniversalCamViewer.exe")
+        self.assertEqual(args[-2:], [r"C:\Program Files\Cam\UniversalCamViewer.exe", "--restarted"])
 
     def test_build_info_roundtrip(self):
         out = self.dir / "info.txt"

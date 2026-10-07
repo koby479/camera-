@@ -6,6 +6,7 @@ for /f "delims=" %%i in ('python -c "import onvif, os; print(os.path.join(os.pat
 echo Using ONVIF wsdl dir: %ONVIF_WSDL%
 
 pyinstaller --noconfirm --onefile --windowed ^
+    --icon "app\assets\logo.ico" ^
     --name "UniversalCamViewer" ^
     --collect-all numpy ^
     --collect-all cv2 ^

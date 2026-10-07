@@ -23,13 +23,21 @@ EVENT_TEXT = {
     "VideoMotion": "תנועה", "VideoLoss": "אובדן וידאו", "VideoBlind": "הסתרת מצלמה",
     "HumanDetect": "זיהוי אדם", "AlarmLocal": "אזעקה", "AlarmNet": "אזעקת רשת",
     "StorageNotExist": "אין כונן", "StorageFailure": "תקלת כונן", "StorageLowSpace": "כונן כמעט מלא",
-    "NetAbort": "ניתוק רשת", "NetAbortExtra": "ניתוק רשת", "IPConflict": "התנגשות IP",
+    "Motion": "תנועה", "NetAbort": "ניתוק רשת", "NetAbortExtra": "ניתוק רשת", "IPConflict": "התנגשות IP",
     "LoginFailed": "כניסה כושלת", "VideoAnalyze": "ניתוח וידאו", "PerimeterDetection": "חציית גבול",
 }
 
 
 def event_text(name: str) -> str:
-    return EVENT_TEXT.get(name, name or "אירוע")
+    """Hebrew name of an event. Some firmwares send 'appEventHumanDetectAlarm' for what others call 'HumanDetect'."""
+    if name in EVENT_TEXT:
+        return EVENT_TEXT[name]
+    core = name
+    if core.startswith("appEvent"):
+        core = core[len("appEvent"):]
+    if core.endswith("Alarm") and len(core) > len("Alarm"):
+        core = core[:-len("Alarm")]
+    return EVENT_TEXT.get(core, name or "אירוע")
 
 
 class AlarmWatcher:
