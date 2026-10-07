@@ -23,12 +23,14 @@ from app.core import decoders, names, settings
 from app.ui.playback_dialog import PlaybackDialog
 from app.ui.event_log import AlarmHub, EventLogDock
 from app.ui.ptz_panel import PtzPanel
+from app.ui.update_ui import UpdateController
 
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("צופה מצלמות אוניברסלי")
+        from app import __version__
+        self.setWindowTitle(f"צופה מצלמות אוניברסלי   {__version__}")
         self.resize(1400, 900)
 
         self.nvrs, self.singles = load_all()
@@ -80,6 +82,8 @@ class MainWindow(QMainWindow):
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.event_dock)
         self.event_dock.setMaximumHeight(220)
         self.menuBar().addAction(self.event_dock.toggleViewAction())
+        self.updates = UpdateController(self)
+        self.updates.build_menu(self.menuBar())
 
         for nvr in self.nvrs:
             item = self.sidebar.add_nvr_node(nvr)
@@ -640,10 +644,22 @@ def _log_uncaught(exc_type, exc, tb):
 
 
 def main():
+    if "--build-info-file" in sys.argv:    # another copy asks "which version are you?" (update from file): no window
+        try:
+            from app.core import updater
+            updater.write_build_info(sys.argv[sys.argv.index("--build-info-file") + 1])
+        finally:
+            os._exit(0)
     if sys.stderr is None:                 # windowed EXE: no console, so write the log file ourselves
         from app.core import applog
         applog.setup()
     sys.excepthook = _log_uncaught
+    try:
+        from app.core import updater
+        if updater.is_frozen():
+            updater.cleanup_leftovers()    # half-finished downloads of an earlier update
+    except Exception:  # noqa: BLE001
+        pass
     from app import __version__
     print(f"[app] Universal Cam Viewer {__version__} started (python {sys.version.split()[0]}, "
           f"frozen={getattr(sys, 'frozen', False)})", file=sys.stderr)
@@ -652,6 +668,7 @@ def main():
     app.setStyleSheet(DARK_THEME)
     win = MainWindow()
     win.show()
+    win.updates.start()                    # quiet update check + a file left next to the program
     code = app.exec()
     # A thread that is still winding down (an NVR read that has not timed out yet) would make Qt abort with
     # "QThread: Destroyed while thread is still running" while Python tears the objects down: leave directly.

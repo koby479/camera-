@@ -24,6 +24,11 @@ jobs:
         run: |
           pip install -r requirements.txt
 
+      - name: Stamp the build number into the program
+        run: |
+          Set-Content -Path app/_build.py -Value "BUILD = ${{ github.run_number }}" -Encoding ascii
+          Get-Content app/_build.py
+
       - name: Locate onvif WSDL directory
         id: onvif_wsdl
         run: |
@@ -39,6 +44,12 @@ jobs:
       - name: Build DEBUG EXE with PyInstaller (console, shows errors)
         run: |
           pyinstaller --noconfirm --onefile --console --name "UniversalCamViewer-DEBUG" --collect-all numpy --collect-all cv2 --collect-all onvif --collect-all av --collect-all zeep --collect-all wsdiscovery --add-data "${{ steps.onvif_wsdl.outputs.path }};onvif\wsdl" --add-data "app;app" app/main.py
+
+      - name: SHA-256 of the EXE (the program checks its update against it)
+        run: |
+          $hash = (Get-FileHash dist/UniversalCamViewer.exe -Algorithm SHA256).Hash.ToLower()
+          Set-Content -Path dist/UniversalCamViewer.exe.sha256 -Value $hash -Encoding ascii
+          Get-Content dist/UniversalCamViewer.exe.sha256
 
       - name: Upload EXE artifact
         uses: actions/upload-artifact@v4
@@ -58,6 +69,8 @@ jobs:
           tag_name: build-${{ github.run_number }}
           name: Build ${{ github.run_number }}
           make_latest: true
+          body: ${{ github.event.head_commit.message }}
           files: |
             dist/UniversalCamViewer.exe
+            dist/UniversalCamViewer.exe.sha256
             dist/UniversalCamViewer-DEBUG.exe
