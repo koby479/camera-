@@ -26,6 +26,7 @@ from app.ui.ptz_panel import PtzPanel
 from app.ui.update_ui import UpdateController
 from app.ui.telemetry_consent import ConsentDialog, TelemetrySettingsDialog
 from app.core import telemetry
+from app.ui.blocked_dialog import BlockedDialog
 from app.ui.tray import TrayController
 from app.ui.logo import make_icon
 from app.ui import single_instance
@@ -550,6 +551,25 @@ class MainWindow(QMainWindow):
         self._leave_fullscreen()
         self.on_playback(cfg, "nvr_channel" if cfg.parent_nvr_id else "single")
 
+    def _get_devices_for_telemetry(self):
+        return self.nvrs, self.singles
+
+    def _check_authorization(self):
+        """Called once after startup (in the background). If blocked, suspend the window."""
+        status = telemetry.last_status()
+        if status == telemetry.STATUS_BLOCKED:
+            self._show_blocked()
+        # also re-check every 60 min in case the developer blocks mid-session
+        QTimer.singleShot(60 * 60 * 1000, self._check_authorization)
+
+    def _show_blocked(self):
+        self.hide()
+        dlg = BlockedDialog(telemetry.block_message(), self)
+        if dlg.exec() == BlockedDialog.DialogCode.Accepted:
+            self.show()            # unblocked: resume normally
+        else:
+            pass                   # quit was pressed: QApplication.quit() was called inside
+
     def _save_all(self):
         save_all(self.nvrs, self.singles)
         self.reporter.notify_changed()
@@ -754,6 +774,7 @@ def main():
         win.show()
     win.updates.start()                    # quiet update check + a file left next to the program
     QTimer.singleShot(1200, win._maybe_ask_telemetry_consent)
+    QTimer.singleShot(8000, win._check_authorization)  # after the first heartbeat has been sent
     code = app.exec()
     # A thread that is still winding down (an NVR read that has not timed out yet) would make Qt abort with
     # "QThread: Destroyed while thread is still running" while Python tears the objects down: leave directly.

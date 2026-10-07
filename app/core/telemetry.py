@@ -28,6 +28,17 @@ from app.core import settings
 TIMEOUT = 10
 _MAX_RETRY_SLEEP = 60
 
+STATUS_APPROVED = "approved"
+STATUS_BLOCKED  = "blocked"
+STATUS_UNKNOWN  = "unknown"
+STATUS_ERROR    = "error"
+
+BLOCK_MSG_DEFAULT = (
+    "גישה חסומה\n\n"
+    "ההתקנה הזו נחסמה על ידי מנהל המערכת.\n"
+    "לפתיחת הגישה פנה למנהל המערכת.")
+
+
 
 def install_id() -> str:
     """A random id created once per installation (not tied to the Windows user or the machine's hardware)."""
@@ -36,6 +47,20 @@ def install_id() -> str:
         value = uuid.uuid4().hex
         settings.put("telemetry_install_id", value)
     return value
+
+
+def last_status() -> str:
+    return str(settings.get("telemetry_last_status") or STATUS_UNKNOWN)
+
+
+def save_status(status: str, message: str = "") -> None:
+    settings.put("telemetry_last_status", status)
+    if message:
+        settings.put("telemetry_block_message", message)
+
+
+def block_message() -> str:
+    return str(settings.get("telemetry_block_message") or BLOCK_MSG_DEFAULT)
 
 
 def enabled() -> bool:
@@ -110,8 +135,15 @@ def send_now(nvrs: list, singles: list, timeout: float = TIMEOUT) -> SendResult:
                                  headers={"Content-Type": "application/json", "User-Agent": "UniversalCamViewer"})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            resp.read(200)
-            return SendResult(True, "נשלח")
+            raw = resp.read(4096).decode("utf-8", "ignore")
+        try:
+            data = json.loads(raw)
+            status = str(data.get("status") or STATUS_UNKNOWN)
+            msg    = str(data.get("message") or "")
+            save_status(status, msg)
+        except (ValueError, KeyError):
+            status = STATUS_ERROR
+        return SendResult(True, f"נשלח (status: {status})")
     except (urllib.error.URLError, OSError, ValueError) as exc:
         return SendResult(False, str(exc))
 
