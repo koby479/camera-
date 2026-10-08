@@ -91,6 +91,59 @@ async def _enumerate_async(host: str, onvif_port: int, username: str, password: 
     return channels
 
 
+def resolve_single_camera_via_onvif(host: str, onvif_port: int, username: str, password: str,
+                                     timeout: float = 6.0) -> tuple[str, int, str] | None:
+    """Quick, single-profile ONVIF probe for one standalone camera (not an NVR): ask the device
+    itself for its first video profile's RTSP stream URI. This is the standards-based way to find
+    a camera's real stream address - unlike a fixed list of per-brand guessed paths, it works for
+    any camera that speaks ONVIF at all, regardless of brand or model. Returns (host, port, path)
+    for building the RTSP URL, correcting for the common case of a NAT-ed device that advertises
+    its own LAN address. Returns None (never raises) if the device doesn't answer ONVIF in time,
+    has no profiles, or anything else goes wrong - callers are expected to fall back to
+    path-guessing in that case."""
+    import asyncio
+    import ipaddress
+    from urllib.parse import urlparse
+
+    async def _one():
+        from onvif import ONVIFCamera
+
+        cam = ONVIFCamera(host, onvif_port, username, password, wsdl_dir=wsdl_dir(), no_cache=True)
+        await asyncio.wait_for(cam.update_xaddrs(), timeout=timeout)
+        media = await cam.create_media_service()
+        profiles = await asyncio.wait_for(media.GetProfiles(), timeout=timeout)
+        if not profiles:
+            return None
+        stream_setup = {"Stream": "RTP-Unicast", "Transport": {"Protocol": "RTSP"}}
+        uri_resp = await asyncio.wait_for(
+            media.GetStreamUri({"StreamSetup": stream_setup, "ProfileToken": profiles[0].token}),
+            timeout=timeout,
+        )
+        return uri_resp.Uri
+
+    try:
+        uri = asyncio.run(_one())
+    except Exception:          # noqa: BLE001 - this is a best-effort probe, never surfaced as an error
+        return None
+    if not uri:
+        return None
+
+    parsed = urlparse(uri)
+    path = (parsed.path or "/") + (f"?{parsed.query}" if parsed.query else "")
+    resolved_host = parsed.hostname or host
+
+    def _is_private(h: str) -> bool:
+        try:
+            return ipaddress.ip_address(h).is_private
+        except ValueError:
+            return False
+
+    if resolved_host != host and _is_private(resolved_host) and not _is_private(host):
+        # Behind NAT the camera advertised its own LAN address; keep what the user configured.
+        return host, parsed.port or 554, path
+    return resolved_host, parsed.port or 554, path
+
+
 def _enumerate_dvrip(nvr_cfg: CameraConfig) -> list[CameraConfig]:
     """XM / Provision CMS protocol: log in (this really verifies the password)
     and create one channel entry per ChannelNum the recorder reports."""

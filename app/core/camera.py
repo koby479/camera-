@@ -44,6 +44,8 @@ class CameraWorker(QThread):
         self._running = True
         self._last_status: CameraStatus | None = None
         self._resolved_path: str | None = None   # local, thread-owned -- never mutate self.cfg directly
+        self._resolved_url: str | None = None    # set instead of _resolved_path when ONVIF resolved it
+        self._onvif_tried = False                # try the ONVIF route at most once per worker lifetime
         self.audio_enabled = False               # flipped from the GUI thread (plain bool, safe)
         self.pending = False        # True while the GUI still owns the last frame -> newer ones are dropped
         self.render = True          # False while the tile is hidden (focus mode): skip the costly conversion
@@ -85,9 +87,9 @@ class CameraWorker(QThread):
             self._last_status = status
             self.status_changed.emit(self.cfg.id, status)
 
-    def _tcp_reachable(self, timeout=2.0) -> bool:
+    def _tcp_reachable(self, port: int | None = None, timeout=2.0) -> bool:
         try:
-            with socket.create_connection((self.cfg.host, self.cfg.port), timeout=timeout):
+            with socket.create_connection((self.cfg.host, port or self.cfg.port), timeout=timeout):
                 return True
         except OSError:
             return False
@@ -111,17 +113,27 @@ class CameraWorker(QThread):
         return self.cfg.rtsp_url_for(path)
 
     def _open_stream(self):
-        """If the user gave a concrete path, use it. If they left it as
-        'auto' (or blank), try the known common paths per brand until one
-        actually yields a frame. IMPORTANT: this never writes to self.cfg
-        directly (that object is shared with the GUI thread, e.g. for
-        saving to disk) -- the resolved path is tracked locally and reported
-        back via the path_resolved signal so the GUI thread can persist it."""
+        """If the user gave a concrete path, use it. If they left it as 'auto' (or blank), first
+        ask the device itself via ONVIF (works for any brand that speaks the standard, which is
+        most modern IP cameras - see _try_onvif), and only if that doesn't work, fall back to
+        trying the known common paths per brand until one actually yields a frame. IMPORTANT:
+        this never writes to self.cfg directly (that object is shared with the GUI thread, e.g.
+        for saving to disk) -- the resolved path/url is tracked locally and reported back via the
+        path_resolved signal so the GUI thread can persist it."""
+        if self._resolved_url:
+            return self._try_open(self._resolved_url)
+
         if self._resolved_path:
             return self._try_open(self._build_url(self._resolved_path))
 
         if self.cfg.rtsp_path and self.cfg.rtsp_path.strip("/").lower() != "auto":
             return self._try_open(self._build_url(self.cfg.rtsp_path))
+
+        if not self._onvif_tried:
+            self._onvif_tried = True
+            cap = self._try_onvif()
+            if cap:
+                return cap
 
         from app.core.rtsp_paths import COMMON_RTSP_PATHS
 
@@ -132,6 +144,39 @@ class CameraWorker(QThread):
                 self.path_resolved.emit(self.cfg.id, path)
                 return cap
         return None
+
+    def _try_onvif(self):
+        """Standards-based alternative to brand-path guessing: ask the device itself, via ONVIF
+        (GetProfiles / GetStreamUri), for its real stream address. Tried once per connection
+        lifetime, before the fixed path list - this works for any ONVIF-compliant camera
+        regardless of brand or model, which a short hardcoded path list can never fully cover.
+        A quick TCP probe on the ONVIF port first avoids wasting time on devices that don't speak
+        it at all. Never raises - on any failure this just returns None and the caller falls back
+        to path-guessing as before."""
+        port = self.cfg.onvif_port or 80
+        if not self._tcp_reachable(port, timeout=1.5):
+            return None
+        from app.core.discovery import resolve_single_camera_via_onvif
+
+        result = resolve_single_camera_via_onvif(self.cfg.host, port, self.cfg.username, self.cfg.password)
+        if not result:
+            return None
+        host, rtsp_port, path = result
+        from urllib.parse import quote
+        auth = f"{quote(self.cfg.username, safe='')}:{quote(self.cfg.password, safe='')}@" if self.cfg.username else ""
+        url = f"rtsp://{auth}{host}:{rtsp_port}{path}"
+        cap = self._try_open(url)
+        if cap:
+            self._resolved_url = url
+            if host == self.cfg.host and rtsp_port == self.cfg.port:
+                # Same host/port as configured: behaves exactly like a normal guessed path, so it
+                # is safe to persist (path_resolved -> cfg.rtsp_path) and skip ONVIF next time.
+                self.path_resolved.emit(self.cfg.id, path)
+            # else: ONVIF resolved a different host or port (NAT / non-default RTSP port). Do not
+            # persist that into cfg.rtsp_path - it would be built against cfg.host:cfg.port on the
+            # next connection and silently point at the wrong place. Re-resolve via ONVIF instead
+            # (cheap: _onvif_tried only gates this worker's current run, not future app starts).
+        return cap
 
     def _run_dvrip(self):
         """XM / Provision CMS protocol (port 34567). Same status semantics as RTSP."""
