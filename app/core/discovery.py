@@ -206,6 +206,53 @@ def _enumerate_hikvision(nvr_cfg: CameraConfig) -> list[CameraConfig]:
     ]
 
 
+def _enumerate_dahua_rtsp(nvr_cfg: CameraConfig) -> list[CameraConfig]:
+    """Dahua/Amcrest-family NVRs: their own configuration/channel-list CGI API is no longer
+    published - Dahua now requires signing an NDA to get the current version, and public forum
+    copies are old enough to be unreliable (some report Dahua blocking cgi-bin access entirely on
+    newer firmware). Implementing against that would be guessing at an API we cannot verify.
+
+    What IS still public and stable across virtually all Dahua/Amcrest/OEM devices is the RTSP
+    URL pattern itself: rtsp://user:pass@host:port/cam/realmonitor?channel=N&subtype=0 (confirmed
+    across multiple independent, current sources). So instead of asking the device for its
+    channel list, this builds that URL for channel=1..nvr_cfg.channel (the count the person typed
+    in the dialog) and verifies each one with a real RTSP login (check_rtsp_auth, same check used
+    everywhere else here) - only channels that actually answer with the right credentials are
+    reported, and a channel number with no camera on it is just skipped, not an error."""
+    from app.core.rtsp_auth import AuthResult, check_rtsp_auth
+
+    count = nvr_cfg.channel or 1
+    result = []
+    for n in range(1, count + 1):
+        path = f"/cam/realmonitor?channel={n}&subtype=0"
+        res = check_rtsp_auth(nvr_cfg.host, nvr_cfg.port, path, nvr_cfg.username, nvr_cfg.password)
+        if res == AuthResult.BAD_CREDENTIALS:
+            raise RuntimeError(f"שם המשתמש או הסיסמה של ה-NVR ({nvr_cfg.host}:{nvr_cfg.port}) שגויים.")
+        if res == AuthResult.UNREACHABLE:
+            if n == 1:
+                raise RuntimeError(
+                    f"אין חיבור RTSP ל-{nvr_cfg.host}:{nvr_cfg.port}. בדוק IP ופורט (לרוב 554).")
+            continue   # device stopped answering partway through - treat as "no more channels"
+        if res == AuthResult.ERROR:
+            continue   # this channel number doesn't exist on the device (e.g. 404) - just skip it
+        result.append(CameraConfig(
+            name=f"{nvr_cfg.name} / ערוץ {n}",
+            host=nvr_cfg.host,
+            port=nvr_cfg.port,
+            username=nvr_cfg.username,
+            password=nvr_cfg.password,
+            rtsp_path=path,
+            channel=n - 1,
+            parent_nvr_id=nvr_cfg.id,
+        ))
+
+    if not result:
+        raise RuntimeError(
+            f"אף ערוץ מתוך {count} לא ענה בהצלחה. בדוק את מספר הערוצים שהזנת, ושה-NVR אכן תומך "
+            f"בנתיב הסטנדרטי cam/realmonitor (רוב ה-Dahua/Amcrest תומכים - אם לא, נסה ONVIF).")
+    return result
+
+
 def _enumerate_dvrip(nvr_cfg: CameraConfig) -> list[CameraConfig]:
     """XM / Provision CMS protocol: log in (this really verifies the password)
     and create one channel entry per ChannelNum the recorder reports."""
@@ -257,6 +304,8 @@ def enumerate_nvr_channels(nvr_cfg: CameraConfig) -> list[CameraConfig]:
         return _enumerate_dvrip(nvr_cfg)
     if nvr_cfg.protocol == "hikvision":
         return _enumerate_hikvision(nvr_cfg)
+    if nvr_cfg.protocol == "dahua_rtsp":
+        return _enumerate_dahua_rtsp(nvr_cfg)
 
     import socket
 

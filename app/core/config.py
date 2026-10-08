@@ -30,8 +30,10 @@ class CameraConfig:
     parent_nvr_id: str | None = None   # None => "single camera" entry, else id of the owning NVR
     transport: str = "tcp"        # tcp | udp
     protocol: str = "rtsp"        # NVR: "onvif" | "dvrip" (XM/Provision, port 34567) | "hikvision" (ISAPI,
-                                   #   HTTP, port in onvif_port); camera: "rtsp" | "dvrip"
-    channel: int = 0              # channel index (0-based) for protocol == "dvrip"
+                                   #   HTTP, port in onvif_port) | "dahua_rtsp" (channel count in `channel`);
+                                   #   camera: "rtsp" | "dvrip"
+    channel: int = 0              # channel index (0-based) for protocol == "dvrip";
+                                   # channel COUNT for an NVR with protocol == "dahua_rtsp"
     stream: str = "Main"          # "Main" | "Extra1" (sub-stream) for protocol == "dvrip"
 
     def rtsp_url_for(self, path: str) -> str:

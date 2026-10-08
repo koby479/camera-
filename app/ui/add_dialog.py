@@ -56,12 +56,21 @@ class AddDeviceDialog(QDialog):
         self.protocol_combo.addItem("ONVIF (סטנדרטי)", "onvif")
         self.protocol_combo.addItem("XM / Provision CMS (פורט 34567)", "dvrip")
         self.protocol_combo.addItem("Hikvision ISAPI (HTTP, לרוב פורט 80)", "hikvision")
+        self.protocol_combo.addItem("Dahua / Amcrest (RTSP, לפי מספר ערוצים)", "dahua_rtsp")
         if existing_cfg and existing_cfg.protocol == "dvrip":
             self.protocol_combo.setCurrentIndex(1)
         elif existing_cfg and existing_cfg.protocol == "hikvision":
             self.protocol_combo.setCurrentIndex(2)
+        elif existing_cfg and existing_cfg.protocol == "dahua_rtsp":
+            self.protocol_combo.setCurrentIndex(3)
         self.onvif_label = QLabel("פורט ONVIF (לרוב 80):")
         self.port_label = QLabel()
+
+        self.channel_count_spin = QSpinBox()
+        self.channel_count_spin.setRange(1, 128)
+        self.channel_count_spin.setValue(
+            (existing_cfg.channel if existing_cfg and existing_cfg.protocol == "dahua_rtsp" else 0) or 4)
+        self.channel_count_label = QLabel("מספר ערוצים ב-NVR:")
 
         form = QFormLayout()
         form.addRow("שם:", self.name_edit)
@@ -70,6 +79,7 @@ class AddDeviceDialog(QDialog):
             form.addRow("סוג חיבור:", self.protocol_combo)
             form.addRow(self.onvif_label, self.onvif_port_spin)
             form.addRow(self.port_label, self.rtsp_port_spin)
+            form.addRow(self.channel_count_label, self.channel_count_spin)
             self.protocol_combo.currentIndexChanged.connect(self._on_protocol_changed)
             self._on_protocol_changed(initial=True)
             note = QLabel("התוכנה תתחבר לפי סוג החיבור שתבחר, ותביא אוטומטית את כל הערוצים המחוברים ל-NVR.")
@@ -97,8 +107,11 @@ class AddDeviceDialog(QDialog):
     def _on_protocol_changed(self, *_args, initial: bool = False):
         proto = self.protocol_combo.currentData()
         dvrip = proto == "dvrip"
-        self.onvif_label.setVisible(not dvrip)
-        self.onvif_port_spin.setVisible(not dvrip)
+        dahua = proto == "dahua_rtsp"
+        self.onvif_label.setVisible(not dvrip and not dahua)
+        self.onvif_port_spin.setVisible(not dvrip and not dahua)
+        self.channel_count_label.setVisible(dahua)
+        self.channel_count_spin.setVisible(dahua)
         if dvrip:
             self.port_label.setText("פורט XM/Provision (לרוב 34567):")
             if not initial or self.rtsp_port_spin.value() == 554:
@@ -120,12 +133,14 @@ class AddDeviceDialog(QDialog):
             base_kwargs["parent_nvr_id"] = self.existing_cfg.parent_nvr_id
 
         if self.is_nvr:
+            proto = self.protocol_combo.currentData()
             return CameraConfig(
                 name=self.name_edit.text().strip() or "NVR",
                 host=self.host_edit.text().strip(),
                 onvif_port=self.onvif_port_spin.value(),
                 port=self.rtsp_port_spin.value(),
-                protocol=self.protocol_combo.currentData(),
+                protocol=proto,
+                channel=self.channel_count_spin.value() if proto == "dahua_rtsp" else 0,
                 username=self.user_edit.text(),
                 password=self.pass_edit.text(),
                 **base_kwargs,
