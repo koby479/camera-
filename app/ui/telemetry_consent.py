@@ -11,9 +11,10 @@ EXPLAIN = (
     "התוכנה יכולה לשלוח אליי (המפתח) פרטי ניהול, כדי שאדע מי משתמש בה ואוכל לתמוך בך.\n\n"
     "מה נשלח, בכל דיווח:\n"
     "  • גרסת התוכנה, שעת ההפעלה, ומספר התקנה אקראי (לא שם המשתמש שלך ב-Windows)\n"
-    "  • עבור כל NVR/מצלמה שהגדרת: השם שנתת לה, כתובת ה-IP, הפורט ומספר הערוצים\n\n"
+    "  • עבור כל NVR/מצלמה שהגדרת: השם שנתת לה, כתובת ה-IP, הפורט ומספר הערוצים\n"
+    "  • אפשר גם, אם תבחר בכך למטה, לשתף את שם המשתמש (לא הסיסמה) של ה-NVR/מצלמה\n\n"
     "מה לעולם לא נשלח:\n"
-    "  • שם משתמש או סיסמה של אף מצלמה או NVR\n"
+    "  • סיסמה של אף מצלמה או NVR, בשום מצב\n"
     "  • תמונה, וידאו או הקלטה כלשהי\n\n"
     "אפשר לשנות את ההחלטה בכל רגע: תפריט עזרה ← \"שיתוף פרטים לניהול\"."
 )
@@ -28,6 +29,7 @@ class ConsentDialog(QDialog):
         text = QTextEdit(EXPLAIN)
         text.setReadOnly(True)
         self.computer_name = QCheckBox("לשתף גם את שם המחשב")
+        self.credentials_username = QCheckBox("לשתף גם את שם המשתמש (לא הסיסמה) של ה-NVR/מצלמה")
         buttons = QDialogButtonBox()
         yes = buttons.addButton("מאשר, שתף", QDialogButtonBox.ButtonRole.AcceptRole)
         no = buttons.addButton("לא תודה", QDialogButtonBox.ButtonRole.RejectRole)
@@ -36,6 +38,7 @@ class ConsentDialog(QDialog):
         lay = QVBoxLayout(self)
         lay.addWidget(text)
         lay.addWidget(self.computer_name)
+        lay.addWidget(self.credentials_username)
         lay.addWidget(buttons)
 
     @staticmethod
@@ -44,6 +47,7 @@ class ConsentDialog(QDialog):
         dlg = ConsentDialog(parent)
         agreed = dlg.exec() == QDialog.DialogCode.Accepted
         settings.put("telemetry_share_computer_name", agreed and dlg.computer_name.isChecked())
+        settings.put("telemetry_share_credentials_username", agreed and dlg.credentials_username.isChecked())
         telemetry.set_enabled(agreed)
         return agreed
 
@@ -65,6 +69,10 @@ class TelemetrySettingsDialog(QDialog):
         self.computer_name.setChecked(bool(settings.get("telemetry_share_computer_name", False)))
         self.computer_name.setEnabled(self.enabled_box.isChecked())
         self.enabled_box.toggled.connect(self.computer_name.setEnabled)
+        self.credentials_username = QCheckBox("לשתף גם את שם המשתמש (לא הסיסמה) של ה-NVR/מצלמה")
+        self.credentials_username.setChecked(bool(settings.get("telemetry_share_credentials_username", False)))
+        self.credentials_username.setEnabled(self.enabled_box.isChecked())
+        self.enabled_box.toggled.connect(self.credentials_username.setEnabled)
         self.status = QLabel(self._status_text())
         self.status.setWordWrap(True)
         send_now = QPushButton("שלח דיווח עכשיו")
@@ -78,6 +86,7 @@ class TelemetrySettingsDialog(QDialog):
         lay.addWidget(text)
         lay.addWidget(self.enabled_box)
         lay.addWidget(self.computer_name)
+        lay.addWidget(self.credentials_username)
         lay.addWidget(send_now)
         lay.addWidget(self.status)
         lay.addWidget(buttons)
@@ -97,5 +106,6 @@ class TelemetrySettingsDialog(QDialog):
     def accept(self):
         telemetry.set_enabled(self.enabled_box.isChecked())
         settings.put("telemetry_share_computer_name", self.computer_name.isChecked())
+        settings.put("telemetry_share_credentials_username", self.credentials_username.isChecked())
         self.reporter.notify_changed()
         super().accept()

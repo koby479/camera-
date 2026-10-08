@@ -5,12 +5,14 @@ full, is exactly this and nothing else:
   - app version and a per-install id (a random id generated once and stored locally - not the Windows user name
     or any personal identifier)
   - the time of the report and the optional computer name IF the person separately turned that on
-  - for every NVR / camera configured in the program: its label, host, port, channel count and protocol
+  - for every NVR / camera configured in the program: its label, host, port, channel, protocol, whether it is
+    an NVR, and the device's own username IF the person separately turned that on (telemetry_share_credentials_username)
 
-USERNAMES AND PASSWORDS OF CAMERAS ARE NEVER INCLUDED. That line is enforced in code (_camera_row below), not
-only by this comment - whoever edits this file must keep it that way: the whole point of asking consent is that
-people can trust exactly what leaves their machine, and credentials are what turns a device list into a break-in
-list for anyone who later reads the sheet."""
+PASSWORDS ARE NEVER INCLUDED, under any setting. That line is enforced in code (_camera_row below), not only by
+this comment - whoever edits this file must keep it that way: the whole point of asking consent is that people
+can trust exactly what leaves their machine, and a password is what turns a device list into a break-in list for
+anyone who later reads the sheet. A username alone is not a credential by itself, which is why it can be made
+opt-in - a password, even opt-in, is not."""
 from __future__ import annotations
 
 import json
@@ -88,8 +90,10 @@ DEFAULT_WEBHOOK = "https://nvr-dashboard.onrender.com/heartbeat"
 def _camera_row(cfg) -> dict:
     """Exactly the fields that are allowed to leave the machine for one configured device. Deliberately built
     field-by-field (never cfg.__dict__ or similar) so a future field added to CameraConfig - including a secret
-    one - cannot silently start being reported."""
-    return {
+    one - cannot silently start being reported.
+
+    cfg.password is never read here, under any setting - see the module docstring."""
+    row = {
         "name": cfg.name,
         "host": cfg.host,
         "port": cfg.port,
@@ -97,6 +101,9 @@ def _camera_row(cfg) -> dict:
         "channel": cfg.channel if cfg.protocol == "dvrip" else None,
         "is_nvr": cfg.parent_nvr_id is None and cfg.protocol in ("dvrip", "onvif"),
     }
+    if settings.get("telemetry_share_credentials_username", False) and cfg.username:
+        row["username"] = cfg.username
+    return row
 
 
 def build_payload(nvrs: list, singles: list) -> dict:
