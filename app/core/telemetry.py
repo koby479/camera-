@@ -82,7 +82,7 @@ def webhook_url() -> str:
     return str(settings.get("telemetry_webhook", "") or DEFAULT_WEBHOOK)
 
 
-DEFAULT_WEBHOOK = ""   # fill in after deploying the Apps Script, or leave empty and set it via settings.put
+DEFAULT_WEBHOOK = "https://nvr-dashboard.onrender.com/heartbeat"
 
 
 def _camera_row(cfg) -> dict:
