@@ -11,6 +11,9 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
+import urllib.error
+import urllib.request
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone, timedelta
 from typing import Any
@@ -23,6 +26,46 @@ from fastapi.responses import HTMLResponse, JSONResponse
 ADMIN_KEY   = os.environ.get("ADMIN_KEY", "change-me")
 DATABASE_URL= os.environ.get("DATABASE_URL", "")
 NEVER_SEND  = ("password","secret","token","key","auth","cred")  # extra paranoia: reject any field name
+
+# ── latest-version link (same repo/asset the app's own self-updater uses, app/core/updater.py) ────────────────
+REPO_URL   = "https://github.com/koby479/camera-"
+ASSET_NAME = "UniversalCamViewer.exe"
+APP_SEMVER = "1.1"           # keep in sync with VERSION in app/__init__.py
+# GitHub keeps this exact URL pointing at whatever the newest release's asset is - no code needed to "update"
+# the link itself; it is always current. We separately fetch the build number only to show it as text.
+DOWNLOAD_URL = f"{REPO_URL}/releases/latest/download/{ASSET_NAME}"
+_RELEASE_CACHE_TTL = 600     # seconds - avoid hitting GitHub on every dashboard page load
+_release_cache: dict[str, Any] = {"build": None, "fetched": 0.0}
+
+
+def _latest_build() -> int | None:
+    """Newest published build number, read from the redirect of releases/latest. Cached for a few minutes;
+    returns None (and the dashboard just hides the version text) if GitHub can't be reached - the download
+    link itself does not depend on this and keeps working either way."""
+    now = time.time()
+    if now - _release_cache["fetched"] < _RELEASE_CACHE_TTL:
+        return _release_cache["build"]
+
+    class _NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *a, **k):
+            return None
+
+    build = None
+    try:
+        opener = urllib.request.build_opener(_NoRedirect)
+        req = urllib.request.Request(f"{REPO_URL}/releases/latest", method="HEAD",
+                                      headers={"User-Agent": "nvr-dashboard"})
+        try:
+            resp = opener.open(req, timeout=6)
+            location = resp.headers.get("Location", "") or resp.geturl()
+        except urllib.error.HTTPError as exc:
+            location = exc.headers.get("Location", "") if exc.code in (301, 302, 303, 307, 308) else ""
+        m = re.search(r"/tag/build-(\d+)", location or "")
+        build = int(m.group(1)) if m else None
+    except (urllib.error.URLError, OSError, ValueError):
+        build = None
+    _release_cache["build"], _release_cache["fetched"] = build, now
+    return build
 
 
 # ── DB ─────────────────────────────────────────────────────────────────────────
@@ -213,9 +256,11 @@ async def dashboard(request: Request):
           </td>
         </tr>"""
 
+    build = _latest_build()
+    version_label = f"v{APP_SEMVER}.{build}" if build else ""
     return HTMLResponse(_dashboard_html(
         total, active, blocked, approved, rows_html,
-        request.query_params.get("key")))
+        request.query_params.get("key"), DOWNLOAD_URL, version_label))
 
 
 def _esc(s: str) -> str:
@@ -240,7 +285,7 @@ color:#fff;font-size:15px;cursor:pointer}button:hover{background:#388bfd}</style
 <button type="submit">כניסה</button></form></div></body></html>"""
 
 
-def _dashboard_html(total, active, blocked, approved, rows_html, key):
+def _dashboard_html(total, active, blocked, approved, rows_html, key, download_url, version_label):
     return f"""<!DOCTYPE html>
 <html dir="rtl" lang="he">
 <head>
@@ -313,11 +358,16 @@ button.btn-block:hover{{background:#ff4d4f28}}
 .btn-ok{{background:var(--red);color:#fff}}
 .btn-ok:hover{{background:#ff6b6b}}
 #refresh-note{{color:var(--muted);font-size:11px;text-align:left;margin-top:12px}}
+.dl-btn{{display:inline-flex;align-items:center;gap:6px;margin-top:10px;padding:9px 16px;
+  background:var(--green);color:#06260f;font-weight:700;font-size:13px;text-decoration:none;
+  border-radius:8px}}
+.dl-btn:hover{{background:#56d364}}
 </style>
 </head>
 <body>
 <h1>🎥 לוח ניהול — צופה מצלמות אוניברסלי</h1>
 <p class="sub">מתרענן כל 60 שניות &nbsp;·&nbsp; <span id="clock"></span></p>
+<a class="dl-btn" href="{download_url}">⬇ הורד את התוכנה{f' (גרסה {version_label})' if version_label else ''}</a>
 
 <div class="cards">
   <div class="card blue"><div class="val">{total}</div><div class="lbl">סה"כ התקנות</div></div>
