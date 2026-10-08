@@ -144,6 +144,68 @@ def resolve_single_camera_via_onvif(host: str, onvif_port: int, username: str, p
     return resolved_host, parsed.port or 554, path
 
 
+def _enumerate_hikvision(nvr_cfg: CameraConfig) -> list[CameraConfig]:
+    """Hikvision (and Hikvision-OEM, e.g. many 'Annke'/'Hiwatch'-style devices) ISAPI: a plain
+    HTTP + XML management API, documented at https://tpp.hikvision.com/Wiki/ISAPI/, authenticated
+    with HTTP Digest. Reads the device's real channel list from /ISAPI/Streaming/channels and
+    builds one CameraConfig per main-stream channel, each a plain RTSP camera at
+    /Streaming/Channels/<id> - the exact path ISAPI's own docs give for playback, and the same one
+    this program's brand-path list already tries first for Hikvision gear."""
+    import urllib.error
+    import urllib.request
+    import xml.etree.ElementTree as ET
+
+    port = nvr_cfg.onvif_port or 80
+    base = f"http://{nvr_cfg.host}:{port}"
+    pwd_mgr = urllib.request.HTTPPasswordMgrWithDefaultRealm()
+    pwd_mgr.add_password(None, base, nvr_cfg.username, nvr_cfg.password)
+    opener = urllib.request.build_opener(urllib.request.HTTPDigestAuthHandler(pwd_mgr))
+
+    try:
+        with opener.open(f"{base}/ISAPI/Streaming/channels", timeout=8) as resp:
+            body = resp.read()
+    except urllib.error.HTTPError as exc:
+        if exc.code == 401:
+            raise RuntimeError(
+                f"שם המשתמש או הסיסמה של ה-NVR ({nvr_cfg.host}:{port}) שגויים.") from exc
+        raise RuntimeError(f"ה-NVR ענה אבל לא כמו מכשיר Hikvision/ISAPI (HTTP {exc.code}).") from exc
+    except (urllib.error.URLError, OSError) as exc:
+        raise RuntimeError(
+            f"אין חיבור ל-{nvr_cfg.host}:{port} ({exc}). "
+            f"בדוק IP ופורט (ISAPI לרוב 80, לפעמים 8000) ופורט-פורוורד בנתב.") from exc
+
+    try:
+        root = ET.fromstring(body)
+    except ET.ParseError as exc:
+        raise RuntimeError(f"ה-NVR ענה אבל לא בפורמט ISAPI XML צפוי: {exc}") from exc
+
+    ns = {"h": "http://www.hikvision.com/ver20/XMLSchema"}
+    channels: list[tuple[str, str]] = []
+    for ch in root.findall("h:StreamingChannel", ns) or root.findall("StreamingChannel"):
+        cid = (ch.findtext("h:id", namespaces=ns) or ch.findtext("id") or "").strip()
+        if not cid or not cid.endswith("01"):   # keep main streams (xx01) only; skip sub-streams (xx02...)
+            continue
+        name = (ch.findtext("h:channelName", namespaces=ns) or ch.findtext("channelName") or "").strip()
+        channels.append((cid, name))
+
+    if not channels:
+        raise RuntimeError("ה-NVR ענה ב-ISAPI, אבל לא דיווח אף ערוץ (Streaming/channels חזר ריק).")
+
+    return [
+        CameraConfig(
+            name=f"{nvr_cfg.name} / {name or f'ערוץ {i + 1}'}",
+            host=nvr_cfg.host,
+            port=nvr_cfg.port,
+            username=nvr_cfg.username,
+            password=nvr_cfg.password,
+            rtsp_path=f"/Streaming/Channels/{cid}",
+            channel=i,
+            parent_nvr_id=nvr_cfg.id,
+        )
+        for i, (cid, name) in enumerate(channels)
+    ]
+
+
 def _enumerate_dvrip(nvr_cfg: CameraConfig) -> list[CameraConfig]:
     """XM / Provision CMS protocol: log in (this really verifies the password)
     and create one channel entry per ChannelNum the recorder reports."""
@@ -193,6 +255,8 @@ def enumerate_nvr_channels(nvr_cfg: CameraConfig) -> list[CameraConfig]:
     Qt slot or the whole window will freeze while it waits."""
     if nvr_cfg.protocol == "dvrip":
         return _enumerate_dvrip(nvr_cfg)
+    if nvr_cfg.protocol == "hikvision":
+        return _enumerate_hikvision(nvr_cfg)
 
     import socket
 

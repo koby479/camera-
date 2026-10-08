@@ -55,8 +55,11 @@ class AddDeviceDialog(QDialog):
         self.protocol_combo = QComboBox()
         self.protocol_combo.addItem("ONVIF (סטנדרטי)", "onvif")
         self.protocol_combo.addItem("XM / Provision CMS (פורט 34567)", "dvrip")
+        self.protocol_combo.addItem("Hikvision ISAPI (HTTP, לרוב פורט 80)", "hikvision")
         if existing_cfg and existing_cfg.protocol == "dvrip":
             self.protocol_combo.setCurrentIndex(1)
+        elif existing_cfg and existing_cfg.protocol == "hikvision":
+            self.protocol_combo.setCurrentIndex(2)
         self.onvif_label = QLabel("פורט ONVIF (לרוב 80):")
         self.port_label = QLabel()
 
@@ -69,7 +72,7 @@ class AddDeviceDialog(QDialog):
             form.addRow(self.port_label, self.rtsp_port_spin)
             self.protocol_combo.currentIndexChanged.connect(self._on_protocol_changed)
             self._on_protocol_changed(initial=True)
-            note = QLabel("התוכנה תתחבר דרך ONVIF ותביא אוטומטית את כל הערוצים המחוברים ל-NVR.")
+            note = QLabel("התוכנה תתחבר לפי סוג החיבור שתבחר, ותביא אוטומטית את כל הערוצים המחוברים ל-NVR.")
             note.setWordWrap(True)
         else:
             form.addRow("פורט RTSP (לרוב 554):", self.rtsp_port_spin)
@@ -92,7 +95,8 @@ class AddDeviceDialog(QDialog):
         layout.addWidget(buttons)
 
     def _on_protocol_changed(self, *_args, initial: bool = False):
-        dvrip = self.protocol_combo.currentData() == "dvrip"
+        proto = self.protocol_combo.currentData()
+        dvrip = proto == "dvrip"
         self.onvif_label.setVisible(not dvrip)
         self.onvif_port_spin.setVisible(not dvrip)
         if dvrip:
@@ -104,6 +108,8 @@ class AddDeviceDialog(QDialog):
             self.port_label.setText("פורט RTSP (לרוב 554, בגישה מרחוק - הפורט החיצוני):")
             if self.rtsp_port_spin.value() == 34567:
                 self.rtsp_port_spin.setValue(554)
+            self.onvif_label.setText(
+                "פורט HTTP/ISAPI (לרוב 80, לפעמים 8000):" if proto == "hikvision" else "פורט ONVIF (לרוב 80):")
 
     def to_config(self) -> CameraConfig:
         # editing an existing device: keep its id (and parent_nvr_id) so the
